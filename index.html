@@ -1,0 +1,746 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+  <title>Times de Vôlei (Tempo Real)</title>
+
+  <!-- UI rápida e responsiva -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Firebase compat (Firestore) -->
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+</head>
+
+<body class="min-h-screen bg-gradient-to-br from-blue-50 to-orange-50">
+  <div id="app" class="p-4 sm:p-6 max-w-6xl mx-auto">
+    <div class="text-center py-12">
+      <p class="text-gray-600">Carregando...</p>
+    </div>
+  </div>
+
+  <!-- Modal Avaliação -->
+  <div id="ratingBack" class="hidden fixed inset-0 bg-black/50 flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl w-full max-w-lg p-4 sm:p-6">
+      <div class="flex items-center justify-between gap-3">
+        <h3 class="text-xl font-extrabold text-gray-800">Avaliar (oculto)</h3>
+        <button id="btnRateClose" class="px-3 py-2 rounded-lg border hover:bg-gray-50">Fechar</button>
+      </div>
+
+      <div id="rateMe" class="mt-2 text-sm text-gray-700"></div>
+
+      <div class="mt-4 grid gap-2">
+        <label class="text-xs text-gray-500">Quem você avalia</label>
+        <select id="rateTarget" class="px-3 py-2 rounded-lg border">
+          <option value="">Selecione</option>
+        </select>
+      </div>
+
+      <div class="mt-4 border rounded-xl p-3">
+        <div class="text-sm font-semibold mb-2">Nota (1–5)</div>
+        <div id="scoreRow" class="flex flex-wrap gap-2"></div>
+      </div>
+
+      <button id="btnSendRating" class="mt-4 w-full px-4 py-2 rounded-lg bg-purple-600 text-white hover:bg-purple-700">
+        Enviar avaliação
+      </button>
+
+      <div class="mt-3 text-xs text-gray-500">
+        Não exibimos “quem avaliou quem”. Guardamos apenas por IDs.
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ==========================================================
+    // ✅ Jeito B: firebaseConfig embutido (GitHub Pages)
+    // ==========================================================
+    const firebaseConfig = {
+  "apiKey": "AIzaSyDykk6em3koHEi7uqBxCB9yycXJC3WOZ2U",
+  "authDomain": "times-manchette.firebaseapp.com",
+  "projectId": "times-manchette",
+  "storageBucket": "times-manchette.firebasestorage.app",
+  "messagingSenderId": "774710663618",
+  "appId": "1:774710663618:web:7585bf93588603c7371e5b",
+  "measurementId": "G-H9WLSPM3QY"
+};
+
+    // ==========================================================
+    // App: Times + inscrições + avaliação oculta + alerta de balanceamento
+    // Backend: Cloud Firestore (tempo real)
+    // ==========================================================
+
+    // ====== Constantes / Storage ======
+    const LS_SESSION = "vb_session_v3";
+    const LS_LAST_CODE = "vb_last_code_v3";
+
+    const POSICOES = ["Levantador","Ponteiro","Oposto","Central","Líbero","Coringa"];
+    const ADMIN_PASS = "admin123"; // troque se quiser
+
+    // ====== Estado ======
+    let session = load(LS_SESSION, { code:"", playerId:"", admin:false });
+
+    let state = {
+      code: session.code || load(LS_LAST_CODE, ""),
+      open: true,
+      players: {},
+      ratings: {},
+      syncMode: "firestore",
+      syncError: "",
+      info: ""
+    };
+
+    // ====== Firestore runtime ======
+    let db = null;
+    let unsub = { meta:null, players:null, ratings:null };
+
+    // ====== Helpers ======
+    function $(id){ return document.getElementById(id); }
+    function nowIso(){ return new Date().toISOString(); }
+    function clamp(n,a,b){ return Math.max(a, Math.min(b, n)); }
+    function avg(arr){ return arr.length ? arr.reduce((x,y)=>x+y,0)/arr.length : 0; }
+    function median(arr){
+      if(!arr.length) return 0;
+      const s=[...arr].sort((a,b)=>a-b);
+      const m=Math.floor(s.length/2);
+      return s.length%2 ? s[m] : (s[m-1]+s[m])/2;
+    }
+    function genCode(len=6){
+      const alphabet="ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+      let out="";
+      for(let i=0;i<len;i++) out += alphabet[Math.floor(Math.random()*alphabet.length)];
+      return out;
+    }
+    function safeId(){
+      if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+      return Math.random().toString(36).slice(2,10) + Date.now().toString(36).slice(2,8);
+    }
+    function escapeHtml(s){
+      return String(s).replace(/[&<>'"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;","\"":"&quot;" }[c]));
+    }
+    function save(key, value){ try{ localStorage.setItem(key, JSON.stringify(value)); }catch{} }
+    function load(key, fallback){
+      try{
+        const raw = localStorage.getItem(key);
+        return raw ? JSON.parse(raw) : fallback;
+      }catch{ return fallback; }
+    }
+
+    function persistSession(){
+      save(LS_SESSION, session);
+      save(LS_LAST_CODE, state.code || "");
+    }
+
+    function setInfo(msg){ state.info = msg ? String(msg) : ""; render(); }
+    function setSyncError(msg){ state.syncError = msg ? String(msg) : ""; render(); }
+
+    function me(){
+      if(!session.playerId) return null;
+      return state.players && state.players[session.playerId] ? state.players[session.playerId] : null;
+    }
+
+    // ====== Skill / Balance ======
+    function byTargetScores(ratings){
+      const map = {};
+      for(const k in (ratings||{})){
+        const r = ratings[k];
+        const tid = r.targetId;
+        if(!map[tid]) map[tid]=[];
+        map[tid].push(Number(r.score)||0);
+      }
+      return map;
+    }
+    function playerSkill(p, byTarget){
+      const base = clamp(Number(p.level)||3, 1, 5);
+      const rec = byTarget[p.id] || [];
+      const med = rec.length ? median(rec) : 3;
+      const adj = (med - 3) * 0.5;
+      return base + adj;
+    }
+    function teamAvg(players, byTarget){
+      return avg(players.map(p => playerSkill(p, byTarget)));
+    }
+    function balanceMessage(t1, t2, byTarget){
+      const a1 = teamAvg(t1, byTarget);
+      const a2 = teamAvg(t2, byTarget);
+      const diff = Math.abs(a1-a2);
+      if(t1.length===0 && t2.length===0) return { ok:true, text:"" };
+      if(diff>=1.25) return { ok:false, text:`⚠️ Desequilíbrio alto (diferença ~${diff.toFixed(2)})` };
+      if(diff>=0.75) return { ok:true, text:`Atenção: pode desequilibrar (~${diff.toFixed(2)})` };
+      return { ok:true, text:`✓ Times equilibrados (~${diff.toFixed(2)})` };
+    }
+
+    // ==========================================================
+    // Firestore paths
+    // matches/{code} (doc) => {open, code, updatedAt}
+    // matches/{code}/players/{playerId}
+    // matches/{code}/ratings/{raterId_targetId}
+    // ==========================================================
+    function matchDoc(code){ return db.collection("matches").doc(String(code||"").toUpperCase()); }
+    function playersCol(code){ return matchDoc(code).collection("players"); }
+    function ratingsCol(code){ return matchDoc(code).collection("ratings"); }
+
+    async function ensureRoom(code){
+      const c = String(code||"").toUpperCase();
+      await matchDoc(c).set({ code:c, open:true, updatedAt: nowIso() }, { merge:true });
+    }
+
+    function detachRoom(){
+      try{ unsub.meta && unsub.meta(); }catch{}
+      try{ unsub.players && unsub.players(); }catch{}
+      try{ unsub.ratings && unsub.ratings(); }catch{}
+      unsub = { meta:null, players:null, ratings:null };
+    }
+
+    function attachRoom(code){
+      const c = String(code||"").toUpperCase();
+      detachRoom();
+      setSyncError("");
+
+      unsub.meta = matchDoc(c).onSnapshot((snap)=>{
+        const d = snap.exists ? snap.data() : null;
+        if(d && typeof d.open === "boolean") state.open = d.open;
+        render();
+      }, (err)=> setSyncError(err && err.message ? err.message : err));
+
+      unsub.players = playersCol(c).onSnapshot((qs)=>{
+        const obj = {};
+        qs.forEach(doc=> obj[doc.id] = doc.data());
+        state.players = obj;
+        render();
+      }, (err)=> setSyncError(err && err.message ? err.message : err));
+
+      unsub.ratings = ratingsCol(c).onSnapshot((qs)=>{
+        const obj = {};
+        qs.forEach(doc=> obj[doc.id] = doc.data());
+        state.ratings = obj;
+        render();
+      }, (err)=> setSyncError(err && err.message ? err.message : err));
+    }
+
+    async function setPlayer(code, player){
+      const c = String(code||"").toUpperCase();
+      await playersCol(c).doc(player.id).set(player, { merge:true });
+      await matchDoc(c).set({ updatedAt: nowIso() }, { merge:true });
+    }
+
+    async function patchPlayer(code, playerId, patch){
+      const c = String(code||"").toUpperCase();
+      await playersCol(c).doc(playerId).set(patch, { merge:true });
+      await matchDoc(c).set({ updatedAt: nowIso() }, { merge:true });
+    }
+
+    async function setRating(code, rating){
+      const c = String(code||"").toUpperCase();
+      await ratingsCol(c).doc(rating.id).set(rating, { merge:true });
+      await matchDoc(c).set({ updatedAt: nowIso() }, { merge:true });
+    }
+
+    async function metaUpdate(code, patch){
+      const c = String(code||"").toUpperCase();
+      await matchDoc(c).set(Object.assign({}, patch, { updatedAt: nowIso() }), { merge:true });
+    }
+
+    async function deleteCollection(colRef){
+      const snap = await colRef.limit(500).get();
+      if(snap.empty) return;
+      const batch = db.batch();
+      snap.docs.forEach(d=> batch.delete(d.ref));
+      await batch.commit();
+      if(snap.size === 500) return deleteCollection(colRef);
+    }
+
+    async function resetRoom(code){
+      const c = String(code||"").toUpperCase();
+      await deleteCollection(playersCol(c));
+      await deleteCollection(ratingsCol(c));
+      await matchDoc(c).set({ code:c, open:true, updatedAt: nowIso() }, { merge:true });
+    }
+
+    // ==========================================================
+    // Actions
+    // ==========================================================
+    async function createRoom(){
+      try{
+        const code = genCode(6);
+        await ensureRoom(code);
+        state.code = code;
+        session.code = code;
+        session.playerId = "";
+        session.admin = false;
+        persistSession();
+        attachRoom(code);
+        setInfo("Sala criada. Compartilhe o código para os outros entrarem.");
+        render();
+      }catch(e){
+        setSyncError(e && e.message ? e.message : e);
+      }
+    }
+
+    async function joinRoom(){
+      try{
+        const code = ($("roomCode")?.value || "").trim().toUpperCase();
+        if(!code) return;
+        state.code = code;
+        session.code = code;
+        session.playerId = "";
+        session.admin = false;
+        persistSession();
+        await ensureRoom(code);
+        attachRoom(code);
+        setInfo("Entrou na sala. Agora cadastre seu nome.");
+        render();
+      }catch(e){
+        setSyncError(e && e.message ? e.message : e);
+      }
+    }
+
+    function leaveRoom(){
+      detachRoom();
+      session.code = "";
+      session.playerId = "";
+      session.admin = false;
+      persistSession();
+      state.code = "";
+      state.players = {};
+      state.ratings = {};
+      state.open = true;
+      state.syncError = "";
+      state.info = "";
+      render();
+    }
+
+    async function registerMe(){
+      try{
+        const code = state.code;
+        if(!code) return;
+
+        const name = ($("playerName")?.value || "").trim();
+        const level = clamp(Number($("playerLevel")?.value || 3), 1, 5);
+        const position = ($("playerPos")?.value || "Coringa");
+
+        if(!name) return alert("Digite seu nome.");
+        if(!state.open) return alert("Inscrição fechada.");
+
+        const id = safeId();
+        const player = { id, name, level, position, team: null, createdAt: nowIso() };
+
+        session.playerId = id;
+        persistSession();
+        await setPlayer(code, player);
+
+        if($("playerName")) $("playerName").value = "";
+        render();
+      }catch(e){
+        setSyncError(e && e.message ? e.message : e);
+      }
+    }
+
+    async function chooseTeam(team){
+      try{
+        const m = me();
+        if(!m) return alert("Cadastre-se para escolher time.");
+        if(!state.open) return alert("Inscrição fechada.");
+
+        const byTarget = byTargetScores(state.ratings);
+        const playersArr = Object.values(state.players||{});
+        const updated = playersArr.map(p => p.id===m.id ? (Object.assign({}, p, { team })) : p);
+        const t1 = updated.filter(p=>p.team===1);
+        const t2 = updated.filter(p=>p.team===2);
+        const msg = balanceMessage(t1,t2,byTarget);
+
+        if(!msg.ok){
+          const ok = confirm(msg.text + "\n\nQuer mesmo escolher este time?");
+          if(!ok) return;
+        }
+        await patchPlayer(state.code, m.id, { team });
+      }catch(e){
+        setSyncError(e && e.message ? e.message : e);
+      }
+    }
+
+    // Rating modal
+    function openRatingModal(){
+      const m = me();
+      if(!m) return alert("Cadastre-se para avaliar.");
+      $("ratingBack").classList.remove("hidden");
+      $("rateMe").textContent = "Você: " + m.name + " (avaliações ocultas)";
+      const sel = $("rateTarget");
+      sel.innerHTML = `<option value="">Selecione</option>`;
+      for(const p of Object.values(state.players||{})){
+        if(p.id === m.id) continue;
+        const opt = document.createElement("option");
+        opt.value = p.id;
+        opt.textContent = p.name;
+        sel.appendChild(opt);
+      }
+      window.__score = 5;
+      renderScoreButtons();
+    }
+    function closeRatingModal(){ $("ratingBack").classList.add("hidden"); }
+    function renderScoreButtons(){
+      const row = $("scoreRow");
+      row.innerHTML = "";
+      [1,2,3,4,5].forEach(n=>{
+        const btn = document.createElement("button");
+        btn.className = "px-3 py-2 rounded-lg border " + (window.__score===n ? "bg-gray-900 text-white border-gray-900" : "bg-white hover:bg-gray-50");
+        btn.textContent = String(n);
+        btn.onclick = ()=>{ window.__score = n; renderScoreButtons(); };
+        row.appendChild(btn);
+      });
+    }
+
+    async function sendRating(){
+      try{
+        const m = me();
+        if(!m) return;
+        const targetId = $("rateTarget").value;
+        if(!targetId) return alert("Selecione quem avaliar.");
+        const score = clamp(Number(window.__score || 5), 1, 5);
+        const id = m.id + "_" + targetId;
+        const rating = { id, raterId: m.id, targetId, score, createdAt: nowIso() };
+        await setRating(state.code, rating);
+        closeRatingModal();
+      }catch(e){
+        setSyncError(e && e.message ? e.message : e);
+      }
+    }
+
+    // Admin
+    function adminLogin(){
+      const pass = ($("adminPass")?.value || "").trim();
+      if(pass !== ADMIN_PASS) return alert("Senha incorreta.");
+      session.admin = true;
+      persistSession();
+      if($("adminPass")) $("adminPass").value = "";
+      render();
+    }
+    function adminLogout(){ session.admin = false; persistSession(); render(); }
+
+    async function toggleOpen(){
+      if(!session.admin) return alert("Somente admin.");
+      await metaUpdate(state.code, { open: !state.open });
+    }
+
+    async function randomizeTeams(){
+      if(!session.admin) return alert("Somente admin.");
+      const byTarget = byTargetScores(state.ratings);
+      const playersArr = Object.values(state.players||{});
+      if(playersArr.length < 2) return;
+
+      const sorted = [...playersArr].sort((a,b)=> playerSkill(b,byTarget) - playerSkill(a,byTarget));
+      let sum1=0, sum2=0;
+      const assign = {};
+      sorted.forEach(p=>{
+        const sk = playerSkill(p,byTarget);
+        if(sum1 <= sum2){ assign[p.id]=1; sum1+=sk; } else { assign[p.id]=2; sum2+=sk; }
+      });
+
+      const batch = db.batch();
+      const code = state.code;
+      Object.keys(assign).forEach(pid=>{
+        batch.set(playersCol(code).doc(pid), { team: assign[pid] }, { merge:true });
+      });
+      batch.set(matchDoc(code), { updatedAt: nowIso() }, { merge:true });
+      await batch.commit();
+    }
+
+    async function resetCurrentRoom(){
+      if(!session.admin) return alert("Somente admin.");
+      if(!confirm("Resetar jogadores e avaliações desta sala?")) return;
+      session.playerId = "";
+      persistSession();
+      await resetRoom(state.code);
+    }
+
+    // ==========================================================
+    // Render
+    // ==========================================================
+    function playerCard(p, byTarget, meId){
+      const sk = playerSkill(p, byTarget).toFixed(1);
+      const you = (meId && p.id===meId) ? `<span class="text-xs px-2 py-1 rounded-full bg-gray-100 text-gray-700">você</span>` : "";
+      return `
+        <div class="rounded-xl border p-3 flex items-center justify-between gap-2">
+          <div>
+            <div class="font-semibold">${escapeHtml(p.name)}</div>
+            <div class="text-xs text-gray-600">${escapeHtml(p.position)} · nível ${p.level} · skill ${sk}</div>
+          </div>
+          ${you}
+        </div>
+      `;
+    }
+
+    function waitingCard(p, byTarget, meId){
+      const sk = playerSkill(p, byTarget).toFixed(1);
+      const isMe = (meId && p.id===meId);
+      return `
+        <div class="rounded-xl border p-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+          <div>
+            <div class="font-semibold">${escapeHtml(p.name)}</div>
+            <div class="text-xs text-gray-600">${escapeHtml(p.position)} · nível ${p.level} · skill ${sk}</div>
+          </div>
+          <div class="text-xs text-gray-500">${isMe ? "Você ainda não escolheu time." : "Apenas o próprio jogador escolhe."}</div>
+        </div>
+      `;
+    }
+
+    function render(){
+      const app = $("app");
+      const code = (state.code || "").toUpperCase();
+
+      const playersArr = Object.values(state.players||{});
+      const ratings = state.ratings||{};
+      const byTarget = byTargetScores(ratings);
+
+      const meObj = me();
+      const team1 = playersArr.filter(p=>p.team===1);
+      const team2 = playersArr.filter(p=>p.team===2);
+      const waiting = playersArr.filter(p=>p.team==null);
+
+      const t1Avg = teamAvg(team1, byTarget).toFixed(2);
+      const t2Avg = teamAvg(team2, byTarget).toFixed(2);
+      const bMsg = balanceMessage(team1, team2, byTarget);
+
+      const openBadge = state.open
+        ? `<span class="text-xs px-2 py-1 rounded-full bg-green-100 text-green-700">INSCRIÇÃO ABERTA</span>`
+        : `<span class="text-xs px-2 py-1 rounded-full bg-red-100 text-red-700">FECHADA</span>`;
+
+      const syncBadge = `<span class="text-xs px-2 py-1 rounded-full bg-indigo-100 text-indigo-700">SYNC: FIRESTORE</span>`;
+
+      app.innerHTML = `
+        <div class="bg-white rounded-2xl shadow p-4 sm:p-6">
+          <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div>
+              <h1 class="text-2xl sm:text-3xl font-extrabold text-gray-800">🏐 Times de Vôlei</h1>
+              <p class="text-sm text-gray-500">Tempo real para todos via Cloud Firestore (GitHub Pages).</p>
+              <div class="mt-2 flex flex-wrap gap-2 items-center">${openBadge}${syncBadge}</div>
+            </div>
+
+            <div class="flex flex-wrap gap-2 items-center">
+              ${code ? `
+                <span class="inline-flex items-center gap-2 rounded-full border px-3 py-1 text-sm">
+                  <span class="text-gray-500">Código:</span>
+                  <span class="font-semibold tracking-widest">${escapeHtml(code)}</span>
+                </span>
+                <button id="btnCopy" class="px-3 py-2 rounded-lg bg-gray-900 text-white hover:bg-gray-800">Copiar</button>
+                <button id="btnLeave" class="px-3 py-2 rounded-lg border hover:bg-gray-50">Sair</button>
+              ` : ``}
+            </div>
+          </div>
+
+          ${state.info ? `
+            <div class="mt-4 p-3 rounded-xl bg-blue-50 border border-blue-200 text-sm text-blue-900">
+              ${escapeHtml(state.info)}
+            </div>
+          ` : ``}
+
+          ${state.syncError ? `
+            <div class="mt-4 p-3 rounded-xl bg-red-50 border border-red-200 text-sm text-red-700">
+              <b>Erro:</b> ${escapeHtml(state.syncError)}<br/>
+              Se aparecer <b>Missing or insufficient permissions</b>, ajuste as Rules do Firestore no Firebase Console.
+            </div>
+          ` : ``}
+
+          ${!code ? `
+            <div class="mt-6 grid gap-3 sm:grid-cols-3">
+              <input id="roomCode" placeholder="Código da partida (ex.: A2K9ZP)" class="px-3 py-2 rounded-lg border sm:col-span-2" />
+              <div class="flex gap-2">
+                <button id="btnJoin" class="flex-1 px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700">Entrar</button>
+                <button id="btnCreate" class="flex-1 px-3 py-2 rounded-lg border hover:bg-gray-50">Criar nova</button>
+              </div>
+            </div>
+            <div class="mt-3 text-sm text-gray-600">
+              Crie uma sala, copie o código e envie no grupo. Todos entram com o mesmo código.
+            </div>
+          ` : `
+            <div class="mt-4 grid gap-4 lg:grid-cols-3">
+              <div class="lg:col-span-1 bg-white rounded-2xl border p-4 space-y-3">
+                <div class="flex items-center justify-between">
+                  <h2 class="text-lg font-semibold">Inscrição</h2>
+                  ${openBadge}
+                </div>
+
+                <div class="grid gap-2">
+                  <input id="playerName" placeholder="Seu nome" class="px-3 py-2 rounded-lg border" />
+                  <div class="grid grid-cols-2 gap-2">
+                    <select id="playerLevel" class="px-3 py-2 rounded-lg border">
+                      <option value="1">Nível 1</option>
+                      <option value="2">Nível 2</option>
+                      <option value="3" selected>Nível 3</option>
+                      <option value="4">Nível 4</option>
+                      <option value="5">Nível 5</option>
+                    </select>
+                    <select id="playerPos" class="px-3 py-2 rounded-lg border">
+                      ${POSICOES.map(p=>`<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`).join("")}
+                    </select>
+                  </div>
+
+                  <button id="btnRegister" class="px-3 py-2 rounded-lg bg-green-600 text-white hover:bg-green-700 ${state.open ? "" : "opacity-50 cursor-not-allowed"}" ${state.open ? "" : "disabled"}>
+                    Entrar na lista
+                  </button>
+
+                  ${meObj ? `<div class="text-sm text-gray-700">
+                      Logado como <span class="font-semibold">${escapeHtml(meObj.name)}</span> · ${meObj.team ? `Time ${meObj.team}` : "sem time"}
+                    </div>`
+                  : `<div class="text-xs text-gray-500">Cada celular cria um jogador (sem login).</div>`}
+                </div>
+
+                <div class="border-t pt-3">
+                  <div class="flex flex-wrap gap-2">
+                    <button id="btnRate" class="px-3 py-2 rounded-lg bg-purple-600 text-white hover:bg-purple-700 ${meObj ? "" : "opacity-50 cursor-not-allowed"}" ${meObj ? "" : "disabled"}>Avaliar</button>
+                    <button id="btnTeam1" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 ${meObj && state.open ? "" : "opacity-50 cursor-not-allowed"}" ${meObj && state.open ? "" : "disabled"}>Time 1</button>
+                    <button id="btnTeam2" class="px-3 py-2 rounded-lg bg-orange-600 text-white hover:bg-orange-700 ${meObj && state.open ? "" : "opacity-50 cursor-not-allowed"}" ${meObj && state.open ? "" : "disabled"}>Time 2</button>
+                  </div>
+
+                  ${bMsg.text ? `
+                    <div class="mt-3 p-3 rounded-xl ${bMsg.ok ? "bg-green-50" : "bg-yellow-50"} border">
+                      <div class="text-sm font-semibold text-center">${escapeHtml(bMsg.text)}</div>
+                    </div>
+                  ` : ``}
+                </div>
+
+                <div class="border-t pt-3">
+                  <h3 class="font-semibold mb-2">Admin</h3>
+                  ${session.admin ? `
+                    <div class="text-sm text-green-700 font-semibold">✓ Admin ativo</div>
+                    <div class="mt-2 flex flex-wrap gap-2">
+                      <button id="btnToggleOpen" class="px-3 py-2 rounded-lg border hover:bg-gray-50">${state.open ? "Fechar" : "Abrir"} inscrição</button>
+                      <button id="btnSort" class="px-3 py-2 rounded-lg border hover:bg-gray-50">Sortear equilibrado</button>
+                      <button id="btnReset" class="px-3 py-2 rounded-lg bg-red-600 text-white hover:bg-red-700">Resetar</button>
+                      <button id="btnAdminOut" class="px-3 py-2 rounded-lg border hover:bg-gray-50">Sair admin</button>
+                    </div>
+                  ` : `
+                    <div class="flex gap-2">
+                      <input id="adminPass" type="password" placeholder="Senha admin" class="px-3 py-2 rounded-lg border flex-1" />
+                      <button id="btnAdminIn" class="px-3 py-2 rounded-lg bg-gray-900 text-white hover:bg-gray-800">Entrar</button>
+                    </div>
+                    <div class="text-xs text-gray-500 mt-2">Senha padrão: <span class="font-mono">${escapeHtml(ADMIN_PASS)}</span> (troque no arquivo).</div>
+                  `}
+                </div>
+              </div>
+
+              <div class="lg:col-span-2 grid gap-4 md:grid-cols-2">
+                <div class="bg-white rounded-2xl border p-4">
+                  <div class="flex items-center justify-between">
+                    <h2 class="text-xl font-bold text-blue-700">Time 1</h2>
+                    <div class="text-sm text-gray-600">Média: ${t1Avg}</div>
+                  </div>
+                  <div class="mt-3 space-y-2">
+                    ${team1.length ? team1.map(p => playerCard(p, byTarget, meObj && meObj.id)).join("") : `<div class="text-sm text-gray-500">Vazio</div>`}
+                  </div>
+                </div>
+
+                <div class="bg-white rounded-2xl border p-4">
+                  <div class="flex items-center justify-between">
+                    <h2 class="text-xl font-bold text-orange-700">Time 2</h2>
+                    <div class="text-sm text-gray-600">Média: ${t2Avg}</div>
+                  </div>
+                  <div class="mt-3 space-y-2">
+                    ${team2.length ? team2.map(p => playerCard(p, byTarget, meObj && meObj.id)).join("") : `<div class="text-sm text-gray-500">Vazio</div>`}
+                  </div>
+                </div>
+
+                <div class="bg-white rounded-2xl border p-4 md:col-span-2">
+                  <div class="flex items-center justify-between">
+                    <h2 class="text-lg font-semibold">Aguardando escolha</h2>
+                    <div class="text-sm text-gray-600">Total: ${playersArr.length}</div>
+                  </div>
+                  <div class="mt-3 space-y-2">
+                    ${waiting.length ? waiting.map(p => waitingCard(p, byTarget, meObj && meObj.id)).join("") : `<div class="text-sm text-gray-500">Ninguém aguardando.</div>`}
+                  </div>
+                </div>
+              </div>
+            </div>
+          `}
+        </div>
+      `;
+
+      // wire events
+      if(code){
+        $("btnCopy").onclick = async ()=> {
+          try{ await navigator.clipboard.writeText(code); setInfo("Código copiado."); }
+          catch{ setInfo("Não foi possível copiar automaticamente."); }
+        };
+        $("btnLeave").onclick = ()=> leaveRoom();
+
+        $("btnRegister").onclick = ()=> registerMe();
+        $("btnRate").onclick = ()=> openRatingModal();
+        $("btnTeam1").onclick = ()=> chooseTeam(1);
+        $("btnTeam2").onclick = ()=> chooseTeam(2);
+
+        if($("btnToggleOpen")) $("btnToggleOpen").onclick = ()=> toggleOpen();
+        if($("btnSort")) $("btnSort").onclick = ()=> randomizeTeams();
+        if($("btnReset")) $("btnReset").onclick = ()=> resetCurrentRoom();
+
+        if($("btnAdminIn")) $("btnAdminIn").onclick = ()=> adminLogin();
+        if($("btnAdminOut")) $("btnAdminOut").onclick = ()=> adminLogout();
+      } else {
+        $("btnJoin").onclick = ()=> joinRoom();
+        $("btnCreate").onclick = ()=> createRoom();
+      }
+    }
+
+    // modal wires
+    function wireModals(){
+      $("btnRateClose").onclick = ()=> closeRatingModal();
+      $("ratingBack").addEventListener("click", (e)=>{ if(e.target === $("ratingBack")) closeRatingModal(); });
+      $("btnSendRating").onclick = ()=> sendRating();
+    }
+
+    // Init
+    (function boot(){
+      wireModals();
+
+      try{
+        firebase.initializeApp(firebaseConfig);
+        db = firebase.firestore();
+      }catch(e){
+        $("app").innerHTML = `
+          <div class="bg-white rounded-2xl shadow p-4 sm:p-6 text-red-700">
+            <b>Erro inicializando Firebase:</b> ${escapeHtml(e && e.message ? e.message : e)}<br/>
+            Confira se o firebaseConfig está correto.
+          </div>
+        `;
+        console.error(e);
+        return;
+      }
+
+      render();
+
+      if(state.code){
+        const code = String(state.code).toUpperCase();
+        ensureRoom(code)
+          .then(()=> attachRoom(code))
+          .then(()=> setInfo("Sala carregada."))
+          .catch(err => setSyncError(err && err.message ? err.message : err));
+      }
+
+      // Auto-testes leves
+      console.assert(median([1,2,3])===2, "median ímpar");
+      console.assert(median([1,2,3,4])===2.5, "median par");
+    })();
+  </script>
+
+  <!--
+  ==========================================================
+  ⚙️ FIRESTORE RULES (MVP para TESTE)
+  Firebase Console -> Firestore Database -> Rules:
+
+  rules_version = '2';
+  service cloud.firestore {
+    match /databases/{database}/documents {
+      match /matches/{code} {
+        allow read, write: if true;
+        match /{document=**} {
+          allow read, write: if true;
+        }
+      }
+    }
+  }
+
+  Se der erro "Missing or insufficient permissions", é Rules.
+  ==========================================================
+  -->
+</body>
+</html>
