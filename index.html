@@ -215,7 +215,7 @@ async function copyText(text){
     }
     function persistSession(){
       save(LS_SESSION, session);
-      save(LS_LAST_CODE, state.code || "");
+      if(state.code) save(LS_LAST_CODE, state.code);
     }
     function setInfo(msg){ state.info = msg ? String(msg) : ""; render(); }
     function setSyncError(msg){ state.syncError = msg ? String(msg) : ""; render(); }
@@ -261,7 +261,7 @@ async function copyText(text){
       const med = rec.length ? median(rec) : RATE_BASELINE;
 
       // Ajuste leve: notas dos outros corrigem a autoavaliação aos poucos
-      const adj = (med - RATE_BASELINE) * 0.35;
+      const adj = (med - RATE_BASELINE) * 0.25;
       return clamp(base + adj, MIN_NOTA, MAX_NOTA);
     }
 
@@ -480,7 +480,7 @@ async function copyText(text){
         session.playerId = "";
         session.admin = false;
         persistSession();
-        attachRoom(code);
+attachRoom(code);
         setInfo("Sala criada. Compartilhe o código para os outros entrarem.");
       }catch(e){ setSyncError(e && e.message ? e.message : e); }
     }
@@ -489,12 +489,17 @@ async function copyText(text){
       try{
         const code = ($("roomCode")?.value || "").trim().toUpperCase();
         if(!code) return;
+        const prevCode = String(session.code||"").toUpperCase();
         state.code = code;
         session.code = code;
-        session.playerId = "";
-        session.admin = false;
+
+        // Mantém o login (playerId/admin) se você estiver reentrando na MESMA sala
+        if(code !== prevCode){
+          session.playerId = "";
+          session.admin = false;
+        }
         persistSession();
-        await ensureRoom(code);
+await ensureRoom(code);
         attachRoom(code);
         setInfo("Entrou na sala. Agora cadastre seu nome.");
       }catch(e){ setSyncError(e && e.message ? e.message : e); }
@@ -1538,11 +1543,16 @@ if($("btnClaimAccessCode")) $("btnClaimAccessCode").onclick = ()=> claimPlayerBy
             });
           });
         }
-      } else {
-        $("btnJoin").onclick = ()=> joinRoom();
-        $("btnCreate").onclick = ()=> createRoom();
-      }
+  } else {
+    // Prefill do último código (não entra automaticamente)
+    if($("roomCode")){
+      const last = String(session.code || load(LS_LAST_CODE, "") || "").toUpperCase();
+      if(!$("roomCode").value) $("roomCode").value = last;
     }
+    $("btnJoin").onclick = ()=> joinRoom();
+    $("btnCreate").onclick = ()=> createRoom();
+  }
+}
 
     function wireModals(){
       $("btnRateClose").onclick = ()=> closeRatingModal();
