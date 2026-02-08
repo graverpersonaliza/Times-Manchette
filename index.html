@@ -86,13 +86,16 @@
     // ✅ Só avisar desequilíbrio depois de X escolhas
     const MIN_ESCOLHAS_PARA_ALERTA = 5;
 
+    // Limite de jogadores por time (6x6)
+    const TEAM_MAX = 6;
+
     // ===============================
     // Estado
     // ===============================
     let session = load(LS_SESSION, { code:"", playerId:"", admin:false });
 
     let state = {
-      code: session.code || load(LS_LAST_CODE, ""),
+      code: "",
       open: true,
       activeRoundId: "",
       activeRoundAtMs: 0,
@@ -129,6 +132,71 @@
       for(let i=0;i<len;i++) out += alphabet[Math.floor(Math.random()*alphabet.length)];
       return out;
     }
+
+// Código do Jogador (para entrar em outro celular/PC)
+function genPlayerCode(len=10){
+  const alphabet="ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let out="";
+  for(let i=0;i<len;i++) out += alphabet[Math.floor(Math.random()*alphabet.length)];
+  return out;
+}
+
+async function ensureAccessCodeForPlayer(code, playerId){
+  const c = String(code||"").toUpperCase();
+  const ref = playersCol(c).doc(playerId);
+  const snap = await ref.get();
+  if(!snap.exists) throw new Error("Jogador não encontrado.");
+  const d = snap.data() || {};
+  if(d.accessCode) return d.accessCode;
+
+  // tenta alguns códigos (baixa chance de colisão)
+  for(let k=0;k<5;k++){
+    const ac = genPlayerCode(10);
+    const q = await playersCol(c).where("accessCode","==",ac).limit(1).get();
+    if(q.empty){
+      await ref.set({ accessCode: ac, updatedAt: nowIso() }, { merge:true });
+      return ac;
+    }
+  }
+  throw new Error("Não consegui gerar um código agora. Tente novamente.");
+}
+
+async function claimPlayerByAccessCode(){
+  try{
+    const code = state.code;
+    if(!code) return alert("Entre na sala primeiro (código da partida).");
+    const acRaw = ($("accessCodeInput")?.value || "").trim().toUpperCase().replace(/\s+/g,"");
+    if(!acRaw) return alert("Digite seu Código do Jogador.");
+    const qs = await playersCol(code).where("accessCode","==",acRaw).limit(1).get();
+    if(qs.empty) return alert("Código não encontrado nesta sala. Verifique e tente novamente.");
+    const doc = qs.docs[0];
+    const d = doc.data() || {};
+    session.playerId = doc.id;
+    persistSession();
+    if($("accessCodeInput")) $("accessCodeInput").value = "";
+    setInfo(`Cadastro recuperado: ${d.name || "Jogador"}.`);
+  }catch(e){
+    setSyncError(e && e.message ? e.message : e);
+  }
+}
+
+async function copyText(text){
+  try{
+    await navigator.clipboard.writeText(text);
+    setInfo("Copiado.");
+  }catch{
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.left = "-9999px";
+    document.body.appendChild(ta);
+    ta.select();
+    try{ document.execCommand("copy"); setInfo("Copiado."); }
+    catch{ alert("Não consegui copiar automaticamente."); }
+    document.body.removeChild(ta);
+  }
+}
+
     function safeId(){
       if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
       return Math.random().toString(36).slice(2,10) + Date.now().toString(36).slice(2,8);
@@ -467,7 +535,9 @@
         if(!state.open) return alert("Inscrição fechada.");
 
         const id = safeId();
-        const player = { id, name, baseNote, position, createdAt: nowIso() };
+        const accessCode = genPlayerCode(10);
+
+        const player = { id, name, baseNote, position, accessCode, createdAt: nowIso() };
 
         session.playerId = id;
         persistSession();
@@ -483,9 +553,26 @@
         });
 
         if($("playerName")) $("playerName").value = "";
-        setInfo("Você entrou na lista e confirmou presença (jogar hoje).");
+        setInfo("Você entrou na lista e confirmou presença (jogar hoje). Seu Código do Jogador: " + accessCode + " (guarde para entrar em outro celular/PC).");
       }catch(e){ setSyncError(e && e.message ? e.message : e); }
     }
+
+    async function updateMyProfile(){
+      const code = state.code;
+      const m = me();
+      if(!code || !m) return;
+
+      try{
+        const baseNote = clamp(Number($("myNoteSelect")?.value || m.baseNote || 5), MIN_NOTA, MAX_NOTA);
+        const position = ($("myPosSelect")?.value || m.position || "Coringa");
+
+        await setPlayer(code, { id: m.id, baseNote, position, updatedAt: nowIso() });
+        setInfo("Sua autoavaliação foi atualizada.");
+      }catch(e){
+        setSyncError(e && e.message ? e.message : e);
+      }
+    }
+
 
     async function markPresence(present){
       const code = state.code;
@@ -530,6 +617,30 @@
 
         const byTarget = byTargetScores(state.ratings);
         const playersArr = Object.values(state.players||{});
+        // Limite 6x6: máximo 6 por time; acima de 12 distribuídos, extras ficam em espera
+        const currentTeam = teamOf(m.id); // 1, 2 ou null
+        let count1 = playersArr.filter(p=> isPresent(p.id) && teamOf(p.id)===1).length;
+        let count2 = playersArr.filter(p=> isPresent(p.id) && teamOf(p.id)===2).length;
+
+        // Para permitir troca de time, desconsidera você do seu time atual
+        if (currentTeam === 1) count1 = Math.max(0, count1 - 1);
+        if (currentTeam === 2) count2 = Math.max(0, count2 - 1);
+
+        const totalAssignedExcludingMe = count1 + count2;
+
+        // Se você ainda não tem time e já existem 12 jogadores distribuídos, você fica em espera
+        if (currentTeam == null && totalAssignedExcludingMe >= TEAM_MAX*2) {
+          return alert("Os times já estão completos (6x6). Você ficará em espera.");
+        }
+
+        // Checa lotação do time alvo (considerando que você vai entrar nele)
+        if (team === 1 && count1 >= TEAM_MAX) {
+          return alert("Time 1 já está completo (6 jogadores).");
+        }
+        if (team === 2 && count2 >= TEAM_MAX) {
+          return alert("Time 2 já está completo (6 jogadores).");
+        }
+
 
         // monta times considerando APENAS presentes
         const t1 = playersArr.filter(p=> isPresent(p.id) && teamOf(p.id)===1 && p.id!==m.id);
@@ -582,15 +693,26 @@
       }catch(e){ setSyncError(e && e.message ? e.message : e); }
     }
 
-    async function randomizeTeams(){
+    
+async function randomizeTeams(){
       if(!session.admin) return alert("Somente admin.");
       if(!state.activeRoundId) return alert("Rodada não carregou.");
       const byTarget = byTargetScores(state.ratings);
 
+      // Apenas presentes
       const playersArr = Object.values(state.players||{}).filter(p=> isPresent(p.id));
       if(playersArr.length < 2) return alert("Poucos presentes para sortear.");
 
-      const sorted = [...playersArr].sort((a,b)=> computedNote(b,byTarget) - computedNote(a,byTarget));
+      // Ordena por ordem de confirmação de presença (mais antigos primeiro)
+      const withCheckin = playersArr.map(p => ({
+        p,
+        t: (state.attendance[p.id] && state.attendance[p.id].checkedInAtMs) || 0
+      })).sort((a,b)=> a.t - b.t);
+
+      // Seleciona no máximo 12 (6x6). Os demais ficam em espera (team null)
+      const selected = withCheckin.slice(0, TEAM_MAX*2).map(x=>x.p);
+
+      const sorted = [...selected].sort((a,b)=> computedNote(b,byTarget) - computedNote(a,byTarget));
       let sum1=0, sum2=0;
       const assign = {};
       sorted.forEach(p=>{
@@ -601,12 +723,22 @@
       const batch = db.batch();
       const code = state.code;
       const rid = state.activeRoundId;
+
+      // Aplica times aos 12 selecionados
       Object.keys(assign).forEach(pid=>{
         batch.set(attendanceCol(code, rid).doc(pid), { team: assign[pid], present:true, updatedAt: nowIso() }, { merge:true });
       });
+
+      // Garante que os demais presentes fiquem em espera (team null)
+      playersArr.forEach(p=>{
+        if(!assign[p.id]){
+          batch.set(attendanceCol(code, rid).doc(p.id), { team: null, present:true, updatedAt: nowIso() }, { merge:true });
+        }
+      });
+
       batch.set(matchDoc(code), { updatedAt: nowIso() }, { merge:true });
       await batch.commit();
-      setInfo("Times sorteados (somente presentes).");
+      setInfo("Times sorteados (6x6). Jogadores extras ficaram em espera.");
     }
 
     async function adminRemovePlayer(playerId, playerName){
@@ -1006,9 +1138,17 @@
 
       const presentPlayers = playersArr.filter(p=> isPresent(p.id));
       const team1 = playersArr.filter(p=> isPresent(p.id) && teamOf(p.id)===1);
+
       const team2 = playersArr.filter(p=> isPresent(p.id) && teamOf(p.id)===2);
       const waiting = playersArr.filter(p=> isPresent(p.id) && teamOf(p.id)==null);
       const absent = playersArr.filter(p=> !isPresent(p.id));
+      const team1Count = team1.length;
+      const team2Count = team2.length;
+      const totalAssigned = team1Count + team2Count;
+      const remaining1 = Math.max(0, TEAM_MAX - team1Count);
+      const remaining2 = Math.max(0, TEAM_MAX - team2Count);
+      const fullTeams = totalAssigned >= TEAM_MAX*2;
+
 
       const t1Avg = teamAvg(team1, byTarget).toFixed(2);
       const t2Avg = teamAvg(team2, byTarget).toFixed(2);
@@ -1101,6 +1241,41 @@
                       ${myPresent ? `<span class="text-green-700 font-semibold">Presente</span>` : `<span class="text-gray-500 font-semibold">Ausente</span>`}
                       ${myTeam ? ` · Time ${myTeam}` : ``}
                     </div>
+                    <div class="mt-3 rounded-xl border bg-white p-3">
+                      <div class="text-sm font-extrabold text-gray-800">Atualizar minha autoavaliação</div>
+                      <div class="mt-2 grid grid-cols-2 gap-2">
+                        <select id="myNoteSelect" class="px-3 py-2 rounded-lg border">
+                          ${[5,6,7,8,9,10].map(n=>`<option value="${n}" ${clamp(Number(meObj.baseNote||5), MIN_NOTA, MAX_NOTA)===n?'selected':''}>Minha nota ${n}</option>`).join("")}
+                        </select>
+                        <select id="myPosSelect" class="px-3 py-2 rounded-lg border">
+                          ${POSICOES.map(p=>`<option value="${escapeHtml(p)}" ${(meObj.position||"Coringa")===p?'selected':''}>${escapeHtml(p)}</option>`).join("")}
+                        </select>
+                      </div>
+                      <button id="btnSaveMyProfile" class="mt-2 w-full px-3 py-2 rounded-lg bg-gray-900 text-white hover:bg-gray-800 font-semibold">
+                        Salvar minha nota
+                      </button>
+                      <div class="mt-2 text-xs text-gray-500">Você pode ajustar sua nota/posição sem sair da sala.</div>
+                    </div>
+
+<div class="mt-3 rounded-xl border bg-white p-3">
+  <div class="text-sm font-extrabold text-gray-800">Meu Código do Jogador</div>
+  <div class="mt-1 text-xs text-gray-500">Use este código para entrar no mesmo cadastro em outro celular/PC.</div>
+  <div class="mt-2 flex items-center gap-2">
+    <div class="flex-1 px-3 py-2 rounded-lg border bg-gray-50 font-mono tracking-widest text-center">
+      ${meObj.accessCode ? escapeHtml(meObj.accessCode) : "—"}
+    </div>
+    <button id="btnCopyMyAccessCode" class="px-3 py-2 rounded-lg bg-gray-900 text-white hover:bg-gray-800 font-semibold ${meObj.accessCode ? "" : "opacity-50 cursor-not-allowed"}" ${meObj.accessCode ? "" : "disabled"}>
+      Copiar
+    </button>
+  </div>
+  ${!meObj.accessCode ? `
+    <button id="btnGenMyAccessCode" class="mt-2 w-full px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold">
+      Gerar meu código
+    </button>
+  ` : ``}
+</div>
+
+
 
                     <div class="flex gap-2">
                       <button id="btnPresent" class="flex-1 px-3 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 font-semibold ${(state.open && !myPresent) ? "" : "opacity-50 cursor-not-allowed"}" ${(state.open && !myPresent) ? "" : "disabled"}>
@@ -1124,15 +1299,32 @@
                         Para jogar nesta rodada, clique em <b>Confirmar presença</b>.
                       </div>
                     `}
-                  ` : `<div class="text-xs text-gray-500">Cada celular cria um jogador (sem login).</div>`}
+                  ` : `
+<div class="mt-2 rounded-xl border bg-gray-50 p-3">
+  <div class="text-sm font-extrabold text-gray-800">Já se cadastrou?</div>
+  <div class="mt-1 text-xs text-gray-600">Digite seu <b>Código do Jogador</b> para recuperar seu cadastro neste aparelho.</div>
+  <div class="mt-2 flex gap-2">
+    <input id="accessCodeInput" placeholder="Ex.: A1B2C3D4E5" class="px-3 py-2 rounded-lg border flex-1 font-mono tracking-widest" />
+    <button id="btnClaimAccessCode" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold">Entrar</button>
+  </div>
+</div>
+<div class="text-xs text-gray-500 mt-2">Dica: ao se cadastrar, anote seu Código do Jogador.</div>
+`}
                 </div>
 
                 <div class="border-t pt-3">
                   <div class="grid gap-2">
                     <div class="flex flex-wrap gap-2">
-                      <button id="btnTeam1" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold ${(meObj && myPresent && state.open) ? "" : "opacity-50 cursor-not-allowed"}" ${(meObj && myPresent && state.open) ? "" : "disabled"}>Time 1</button>
-                      <button id="btnTeam2" class="px-3 py-2 rounded-lg bg-orange-600 text-white hover:bg-orange-700 font-semibold ${(meObj && myPresent && state.open) ? "" : "opacity-50 cursor-not-allowed"}" ${(meObj && myPresent && state.open) ? "" : "disabled"}>Time 2</button>
+                      <button id="btnTeam1" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null)) ? "" : "opacity-50 cursor-not-allowed"}" ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null)) ? "" : "disabled"}>Time 1 (${team1Count}/${TEAM_MAX})</button>
+                      <button id="btnTeam2" class="px-3 py-2 rounded-lg bg-orange-600 text-white hover:bg-orange-700 font-semibold ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null)) ? "" : "opacity-50 cursor-not-allowed"}" ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null)) ? "" : "disabled"}>Time 2 (${team2Count}/${TEAM_MAX})</button>
                     </div>
+
+                    <div class="text-xs text-gray-600">
+                      Vagas: <span class="font-semibold text-blue-700">${remaining1}</span> no Time 1 ·
+                      <span class="font-semibold text-orange-700">${remaining2}</span> no Time 2 ·
+                      <span class="font-semibold">${waiting.length}</span> em espera
+                    </div>
+
                     <button id="btnRate" class="w-full px-3 py-2 rounded-lg bg-purple-600 text-white hover:bg-purple-700 font-semibold ${(meObj && myPresent) ? "" : "opacity-50 cursor-not-allowed"}" ${(meObj && myPresent) ? "" : "disabled"}>Avaliar jogadores</button>
                   </div>
 
@@ -1225,7 +1417,7 @@
               <div class="lg:col-span-2 grid gap-4 md:grid-cols-2">
                 <div class="bg-white rounded-2xl border p-4">
                   <div class="flex items-center justify-between">
-                    <h2 class="text-xl font-bold text-blue-700">Time 1</h2>
+                    <h2 class="text-xl font-bold text-blue-700">Time 1 <span class="text-sm font-semibold text-gray-600">(${team1Count}/${TEAM_MAX})</span></h2>
                     <div class="text-sm text-gray-600">Média: ${t1Avg}</div>
                   </div>
                   <div class="mt-3 space-y-2">
@@ -1235,7 +1427,7 @@
 
                 <div class="bg-white rounded-2xl border p-4">
                   <div class="flex items-center justify-between">
-                    <h2 class="text-xl font-bold text-orange-700">Time 2</h2>
+                    <h2 class="text-xl font-bold text-orange-700">Time 2 <span class="text-sm font-semibold text-gray-600">(${team2Count}/${TEAM_MAX})</span></h2>
                     <div class="text-sm text-gray-600">Média: ${t2Avg}</div>
                   </div>
                   <div class="mt-3 space-y-2">
@@ -1277,6 +1469,24 @@
         $("btnLeave").onclick = ()=> leaveRoom();
 
         if($("btnRegister")) $("btnRegister").onclick = ()=> registerMe();
+        if($("btnSaveMyProfile")) $("btnSaveMyProfile").onclick = ()=> updateMyProfile();
+
+if($("btnCopyMyAccessCode")) $("btnCopyMyAccessCode").onclick = ()=> {
+  const m = me();
+  if(m && m.accessCode) copyText(String(m.accessCode));
+};
+if($("btnGenMyAccessCode")) $("btnGenMyAccessCode").onclick = async ()=> {
+  const m = me();
+  if(!m) return;
+  try{
+    const ac = await ensureAccessCodeForPlayer(state.code, m.id);
+    setInfo("Código gerado: " + ac);
+  }catch(e){
+    setSyncError(e && e.message ? e.message : e);
+  }
+};
+if($("btnClaimAccessCode")) $("btnClaimAccessCode").onclick = ()=> claimPlayerByAccessCode();
+
         if($("btnSairLista")) $("btnSairLista").onclick = ()=> sairDaLista();
 
         if($("btnPresent")) $("btnPresent").onclick = ()=> markPresence(true);
@@ -1361,16 +1571,7 @@
       }
 
       render();
-
-      if(state.code){
-        const code = String(state.code).toUpperCase();
-        ensureRoom(code)
-          .then(()=> attachRoom(code))
-          .then(()=> setInfo("Sala carregada."))
-          .catch(err => setSyncError(err && err.message ? err.message : err));
-      }
-
-      // Testes leves (console)
+// Testes leves (console)
       console.assert(median([5,6,7])===6, "median ímpar");
       console.assert(median([5,6,7,8])===6.5, "median par");
       const bm0 = balanceMessage([{id:"a",baseNote:7}], [], {});
