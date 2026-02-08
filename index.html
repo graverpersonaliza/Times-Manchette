@@ -92,7 +92,7 @@
     // ===============================
     // Estado
     // ===============================
-    let session = load(LS_SESSION, { code:"", playerId:"", admin:false });
+    let session = load(LS_SESSION, { code:"", playerId:"", prevPlayerId:"", admin:false });
 
     let state = {
       code: "",
@@ -568,18 +568,45 @@ await ensureRoom(code);
       if(!code || !m) return;
 
       try{
+        const name = String($("myNameInput")?.value || m.name || "").trim();
+        if(!name || name.length < 2) return alert("Informe um nome válido (mín. 2 letras).");
         const baseNote = clamp(Number($("myNoteSelect")?.value || m.baseNote || 5), MIN_NOTA, MAX_NOTA);
         const position = ($("myPosSelect")?.value || m.position || "Coringa");
 
-        await setPlayer(code, { id: m.id, baseNote, position, updatedAt: nowIso() });
-        setInfo("Sua autoavaliação foi atualizada.");
+        await setPlayer(code, { id: m.id, name, baseNote, position, updatedAt: nowIso() });
+        setInfo("Cadastro atualizado (nome/nota/posição).");
       }catch(e){
         setSyncError(e && e.message ? e.message : e);
       }
-    }
+}
 
 
-    async function markPresence(present){
+    
+function startAddPlayer(){
+  const code = state.code;
+  if(!code) return alert("Entre em uma sala primeiro (código da partida).");
+  if(session.playerId) session.prevPlayerId = session.playerId;
+  session.playerId = "";
+  persistSession();
+  // limpa o formulário de cadastro
+  if($("playerName")) $("playerName").value = "";
+  if($("playerNote")) $("playerNote").value = "5";
+  if($("playerPos")) $("playerPos").value = "Coringa";
+  setInfo("Modo adicionar jogador: cadastre a pessoa e depois passe o Código do Jogador para ela recuperar no celular/PC.");
+  render();
+  try{ window.scrollTo({top: 0, behavior: "smooth"}); }catch{ window.scrollTo(0,0); }
+}
+
+function backToPrevPlayer(){
+  if(!session.prevPlayerId) return;
+  session.playerId = session.prevPlayerId;
+  session.prevPlayerId = "";
+  persistSession();
+  setInfo("Você voltou para seu jogador.");
+  render();
+}
+
+async function markPresence(present){
       const code = state.code;
       const m = me();
       if(!code || !m) return;
@@ -1246,9 +1273,41 @@ async function randomizeTeams(){
                       ${myPresent ? `<span class="text-green-700 font-semibold">Presente</span>` : `<span class="text-gray-500 font-semibold">Ausente</span>`}
                       ${myTeam ? ` · Time ${myTeam}` : ``}
                     </div>
+<div class="mt-2 flex gap-2">
+  <button id="btnPresent" class="flex-1 px-3 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 font-semibold ${(state.open && !myPresent) ? "" : "opacity-50 cursor-not-allowed"}" ${(state.open && !myPresent) ? "" : "disabled"}>
+    Confirmar presença
+  </button>
+  <button id="btnAbsent" class="flex-1 px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold ${(state.open && myPresent) ? "" : "opacity-50 cursor-not-allowed"}" ${(state.open && myPresent) ? "" : "disabled"}>
+    Marcar ausência
+  </button>
+</div>
+
+<div class="mt-2 grid grid-cols-2 gap-2">
+  <button id="btnAddPlayer" class="px-3 py-2 rounded-lg bg-purple-600 text-white hover:bg-purple-700 font-semibold">
+    Adicionar jogador
+  </button>
+  ${session.prevPlayerId ? `
+    <button id="btnBackToMe2" class="px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold">
+      Voltar para meu jogador
+    </button>
+  ` : `
+    <button class="px-3 py-2 rounded-lg border text-gray-400 cursor-not-allowed" disabled>
+      Voltar para meu jogador
+    </button>
+  `}
+</div>
+
+<div class="mt-1 text-xs text-gray-600">
+  Dica: use <b>Adicionar jogador</b> para cadastrar alguém pelo seu celular e passe o <b>Código do Jogador</b> para ele recuperar no aparelho dele.
+</div>
+
                     <div class="mt-3 rounded-xl border bg-white p-3">
-                      <div class="text-sm font-extrabold text-gray-800">Atualizar minha autoavaliação</div>
-                      <div class="mt-2 grid grid-cols-2 gap-2">
+                      <div class="text-sm font-extrabold text-gray-800">Atualizar meu cadastro</div>
+                      <div class="mt-2">
+  <input id="myNameInput" class="w-full px-3 py-2 rounded-lg border" placeholder="Meu nome" value="${escapeHtml(meObj.name||"")}" />
+</div>
+<div class="mt-2 grid grid-cols-2 gap-2">
+
                         <select id="myNoteSelect" class="px-3 py-2 rounded-lg border">
                           ${[5,6,7,8,9,10].map(n=>`<option value="${n}" ${clamp(Number(meObj.baseNote||5), MIN_NOTA, MAX_NOTA)===n?'selected':''}>Minha nota ${n}</option>`).join("")}
                         </select>
@@ -1257,40 +1316,28 @@ async function randomizeTeams(){
                         </select>
                       </div>
                       <button id="btnSaveMyProfile" class="mt-2 w-full px-3 py-2 rounded-lg bg-gray-900 text-white hover:bg-gray-800 font-semibold">
-                        Salvar minha nota
+                        Salvar cadastro
                       </button>
-                      <div class="mt-2 text-xs text-gray-500">Você pode ajustar sua nota/posição sem sair da sala.</div>
+                      <div class="mt-2 text-xs text-gray-500">Atualize nome, nota e posição sem sair da sala.</div>
                     </div>
 
 <div class="mt-3 rounded-xl border bg-white p-3">
   <div class="text-sm font-extrabold text-gray-800">Meu Código do Jogador</div>
   <div class="mt-1 text-xs text-gray-500">Use este código para entrar no mesmo cadastro em outro celular/PC.</div>
   <div class="mt-2 flex items-center gap-2">
-    <div class="flex-1 px-3 py-2 rounded-lg border bg-gray-50 font-mono tracking-widest text-center">
+    <div class="flex-1 px-2 py-1.5 rounded-lg border bg-gray-50 font-mono tracking-wider text-center text-sm">
       ${meObj.accessCode ? escapeHtml(meObj.accessCode) : "—"}
     </div>
-    <button id="btnCopyMyAccessCode" class="px-3 py-2 rounded-lg bg-gray-900 text-white hover:bg-gray-800 font-semibold ${meObj.accessCode ? "" : "opacity-50 cursor-not-allowed"}" ${meObj.accessCode ? "" : "disabled"}>
+    <button id="btnCopyMyAccessCode" class="px-2 py-1.5 rounded-lg bg-gray-900 text-white hover:bg-gray-800 font-semibold text-sm ${meObj.accessCode ? "" : "opacity-50 cursor-not-allowed"}" ${meObj.accessCode ? "" : "disabled"}>
       Copiar
     </button>
   </div>
   ${!meObj.accessCode ? `
-    <button id="btnGenMyAccessCode" class="mt-2 w-full px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold">
+    <button id="btnGenMyAccessCode" class="mt-2 w-full px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold text-sm">
       Gerar meu código
     </button>
   ` : ``}
 </div>
-
-
-
-                    <div class="flex gap-2">
-                      <button id="btnPresent" class="flex-1 px-3 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 font-semibold ${(state.open && !myPresent) ? "" : "opacity-50 cursor-not-allowed"}" ${(state.open && !myPresent) ? "" : "disabled"}>
-                        Confirmar presença
-                      </button>
-                      <button id="btnAbsent" class="flex-1 px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold ${(state.open && myPresent) ? "" : "opacity-50 cursor-not-allowed"}" ${(state.open && myPresent) ? "" : "disabled"}>
-                        Marcar ausência
-                      </button>
-                    </div>
-
                     <button id="btnSairLista" class="w-full px-3 py-2 rounded-lg bg-red-600 text-white hover:bg-red-700 font-semibold">
                       Sair da lista
                     </button>
@@ -1305,12 +1352,18 @@ async function randomizeTeams(){
                       </div>
                     `}
                   ` : `
+                    ${session.prevPlayerId ? `
+                      <button id="btnBackToMe" class="w-full px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold">
+                        Voltar para meu jogador
+                      </button>
+                    ` : ``}
 <div class="mt-2 rounded-xl border bg-gray-50 p-3">
+
   <div class="text-sm font-extrabold text-gray-800">Já se cadastrou?</div>
   <div class="mt-1 text-xs text-gray-600">Digite seu <b>Código do Jogador</b> para recuperar seu cadastro neste aparelho.</div>
   <div class="mt-2 flex gap-2">
-    <input id="accessCodeInput" placeholder="Ex.: A1B2C3D4E5" class="px-3 py-2 rounded-lg border flex-1 font-mono tracking-widest" />
-    <button id="btnClaimAccessCode" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold">Entrar</button>
+    <input id="accessCodeInput" placeholder="Ex.: A1B2C3D4E5" class="px-2 py-1.5 rounded-lg border flex-1 font-mono tracking-wider text-sm" />
+    <button id="btnClaimAccessCode" class="px-3 py-1.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold text-sm">Entrar</button>
   </div>
 </div>
 <div class="text-xs text-gray-500 mt-2">Dica: ao se cadastrar, anote seu Código do Jogador.</div>
@@ -1491,6 +1544,10 @@ if($("btnGenMyAccessCode")) $("btnGenMyAccessCode").onclick = async ()=> {
   }
 };
 if($("btnClaimAccessCode")) $("btnClaimAccessCode").onclick = ()=> claimPlayerByAccessCode();
+
+        if($("btnAddPlayer")) $("btnAddPlayer").onclick = ()=> startAddPlayer();
+        if($("btnBackToMe")) $("btnBackToMe").onclick = ()=> backToPrevPlayer();
+        if($("btnBackToMe2")) $("btnBackToMe2").onclick = ()=> backToPrevPlayer();
 
         if($("btnSairLista")) $("btnSairLista").onclick = ()=> sairDaLista();
 
