@@ -206,6 +206,13 @@ async function copyText(text){
         "&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"
       }[c]));
     }
+
+
+function safeBoldInfo(s){
+  // Permite apenas <b> e </b> no texto de info; todo o resto permanece escapado
+  const e = escapeHtml(s||"");
+  return e.replace(/&lt;b&gt;/g, "<b>").replace(/&lt;\/b&gt;/g, "</b>");
+}
     function save(key, value){ try{ localStorage.setItem(key, JSON.stringify(value)); }catch{} }
     function load(key, fallback){
       try{
@@ -230,6 +237,26 @@ async function copyText(text){
       if(!session.playerId) return null;
       return state.players && state.players[session.playerId] ? state.players[session.playerId] : null;
     }
+
+async function ensureMeLoaded(){
+  const m = me();
+  if(m) return m;
+  const code = state.code;
+  const pid = session.playerId;
+  if(!code || !pid || !db) return null;
+  try{
+    const snap = await playersCol(code).doc(pid).get();
+    if(snap.exists){
+      state.players[pid] = snap.data();
+      render();
+      return state.players[pid];
+    }
+  }catch(e){
+    // ignore
+  }
+  return null;
+}
+
 
     function isPresent(playerId){
       const a = state.attendance && state.attendance[playerId];
@@ -501,7 +528,7 @@ attachRoom(code);
         persistSession();
 await ensureRoom(code);
         attachRoom(code);
-        setInfo("Entrou na sala. Agora cadastre seu nome.");
+        setInfo("<b>Entrou na sala, Agora cadastre seu nome ou entre com seu codigo do jogador</b>");
       }catch(e){ setSyncError(e && e.message ? e.message : e); }
     }
 
@@ -532,6 +559,13 @@ await ensureRoom(code);
         const code = state.code;
         if(!code) return;
         if(!state.activeRoundId) return alert("Rodada não carregou. Recarregue a página.");
+
+        // Bloqueia nova inscrição quando já está logado neste aparelho
+        const already = me();
+        if(already){
+          return alert("Você já está logado. Para mudar seus dados use 'Atualizar meu cadastro' ou 'Sair da lista'. Para cadastrar outra pessoa, use 'Adicionar jogador'.");
+        }
+
         const name = ($("playerName")?.value || "").trim();
         const baseNote = clamp(Number($("playerNote")?.value || 5), MIN_NOTA, MAX_NOTA);
         const position = ($("playerPos")?.value || "Coringa");
@@ -561,6 +595,73 @@ await ensureRoom(code);
         setInfo("Você entrou na lista e confirmou presença (jogar hoje). Seu Código do Jogador: " + accessCode + " (guarde para entrar em outro celular/PC).");
       }catch(e){ setSyncError(e && e.message ? e.message : e); }
     }
+
+async function registerMeSendWhatsApp(){
+  // Abre uma janela antes (evita bloqueio de popup em alguns navegadores)
+  const pre = window.open("about:blank", "_blank");
+
+  try{
+    const code = state.code;
+    if(!code){ if(pre) pre.close(); return alert("Entre na sala primeiro (código da partida)."); }
+    if(!state.activeRoundId){ if(pre) pre.close(); return alert("Rodada não carregou. Recarregue a página."); }
+
+    // ✅ Se já está logado: apenas envia os dados no WhatsApp (não cadastra de novo)
+    const logged = me();
+    if(logged){
+      let accessCode = logged.accessCode;
+      if(!accessCode){
+        // gera se estiver vazio (caso antigo)
+        accessCode = await ensureAccessCodeForPlayer(code, logged.id);
+      }
+      const msg = buildInviteMessage(logged.name || "Jogador", String(code).toUpperCase(), String(accessCode));
+      const url = "https://wa.me/?text=" + encodeURIComponent(msg);
+      if(pre) pre.location.href = url;
+      else window.open(url, "_blank");
+      setInfo("WhatsApp aberto com sua mensagem pronta. Agora é só tocar em ENVIAR.");
+      return;
+    }
+
+    // ✅ Se NÃO está logado: cadastra e já abre WhatsApp
+    const name = ($("playerName")?.value || "").trim();
+    const baseNote = clamp(Number($("playerNote")?.value || 5), MIN_NOTA, MAX_NOTA);
+    const position = ($("playerPos")?.value || "Coringa");
+
+    if(!name) { if(pre) pre.close(); return alert("Digite seu nome."); }
+    if(!state.open) { if(pre) pre.close(); return alert("Inscrição fechada."); }
+
+    const id = safeId();
+    const accessCode = genPlayerCode(10);
+
+    const player = { id, name, baseNote, position, accessCode, createdAt: nowIso() };
+
+    session.playerId = id;
+    persistSession();
+
+    await setPlayer(code, player);
+
+    await setAttendance(code, state.activeRoundId, id, {
+      present: true,
+      team: null,
+      checkedInAtMs: nowMs(),
+      updatedAt: nowIso()
+    });
+
+    // limpa campos
+    if($("playerName")) $("playerName").value = "";
+
+    // monta mensagem e abre WhatsApp
+    const msg = buildInviteMessage(name, String(code).toUpperCase(), accessCode);
+    const url = "https://wa.me/?text=" + encodeURIComponent(msg);
+    if(pre) pre.location.href = url;
+    else window.open(url, "_blank");
+
+    setInfo("Cadastro criado. Código do Jogador: " + accessCode + " — WhatsApp aberto com a mensagem pronta. Agora é só tocar em ENVIAR.");
+  }catch(e){
+    if(pre) try{ pre.close(); }catch{}
+    setSyncError(e && e.message ? e.message : e);
+  }
+}
+
 
     async function updateMyProfile(){
       const code = state.code;
@@ -602,14 +703,20 @@ function backToPrevPlayer(){
   session.playerId = session.prevPlayerId;
   session.prevPlayerId = "";
   persistSession();
+  // Reanexa listeners para garantir que times/presença não "sumam" ao trocar de jogador
+  if(state.code) attachRoom(state.code);
   setInfo("Você voltou para seu jogador.");
   render();
 }
 
 async function markPresence(present){
       const code = state.code;
-      const m = me();
-      if(!code || !m) return;
+      let m = me();
+      if(!code) return alert("Entre na sala primeiro (código da partida).");
+      if(!m){
+        m = await ensureMeLoaded();
+        if(!m) return alert("Seu cadastro ainda não carregou. Aguarde 1 segundo e tente novamente.");
+      }
       if(!state.activeRoundId) return alert("Rodada não carregou. Recarregue a página.");
       if(!state.open) return alert("Inscrição fechada.");
 
@@ -620,7 +727,7 @@ async function markPresence(present){
           checkedInAtMs: present ? nowMs() : null,
           updatedAt: nowIso()
         });
-        setInfo(present ? "Presença confirmada. Agora escolha seu time." : "Ausência marcada para esta rodada.");
+        setInfo(present ? "<b>Presença confirmada. Agora escolha seu time</b>" : "Ausência marcada para esta rodada.");
       }catch(e){ setSyncError(e && e.message ? e.message : e); }
     }
 
@@ -641,7 +748,8 @@ async function markPresence(present){
 
     async function chooseTeam(team){
       try{
-        const m = me();
+        let m = me();
+        if(!m){ m = await ensureMeLoaded(); }
         if(!m) return alert("Cadastre-se para escolher time.");
         if(!state.open) return alert("Inscrição fechada.");
         if(!state.activeRoundId) return alert("Rodada não carregou. Recarregue a página.");
@@ -948,6 +1056,38 @@ async function randomizeTeams(){
       window.open(url, "_blank");
     }
 
+    function baseSiteUrl(){
+      try{
+        return (location.origin || "") + (location.pathname || "");
+      }catch{
+        return "";
+      }
+    }
+
+    function buildInviteMessage(nome, sala, codigoJogador){
+  return `VÔLEI NO SIDNEY
+SEU ACESSO 
+Nome: ${nome}
+Sala: ${sala}
+Código do Jogador: ${codigoJogador}
+COMO USAR (rápido): 
+1) Abra o site
+ 2) Clique em ENTRAR e digite o código da sala: ${sala}
+3) Em "Meu Código do Jogador", digite o seu Código do Jogador: ${codigoJogador}
+4) Confirme PRESENÇA 
+5) Escolha o TIME (1 ou 2) 
+6) Avalie jogadores (nota oculta 5–10) 
+DICA: - A "Minha nota" é sua autoavaliação (5–10). - Você pode atualizar depois em "Atualizar meu cadastro".`;
+}
+
+
+function openWhatsApp(text, numberDigits){
+  const base = numberDigits ? ("https://wa.me/" + numberDigits + "?text=") : "https://wa.me/?text=";
+  window.open(base + encodeURIComponent(text), "_blank");
+}
+
+
+
     async function copyCurrentTeams(){
       if(!session.admin) return alert("Somente o admin pode compartilhar/baixar.");
       const payload = buildTeamsPayloadFromCurrent();
@@ -1093,16 +1233,16 @@ async function randomizeTeams(){
     // ===============================
     function playerCard(p, byTarget, meId, isAdmin){
       const note = computedNote(p, byTarget).toFixed(1);
-      const you = (meId && p.id===meId) ? `<span class="text-xs px-2 py-1 rounded-full bg-gray-100 text-gray-700">você</span>` : "";
+      const you = (meId && p.id===meId) ? `<span class="text-[11px] px-2 py-1 rounded-full bg-gray-100 text-gray-700">você</span>` : "";
       const del = (isAdmin && (!meId || p.id!==meId)) ? `
-        <button data-del="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg border hover:bg-gray-50 text-xs">
+        <button data-del="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg border hover:bg-gray-50 text-[11px]">
           Remover
         </button>` : "";
       return `
-        <div class="rounded-xl border p-3 flex items-center justify-between gap-2 bg-white">
+        <div class="rounded-lg border p-2 flex items-center justify-between gap-2 bg-white">
           <div>
-            <div class="font-semibold">${escapeHtml(p.name)}</div>
-            <div class="text-xs text-gray-600">${escapeHtml(p.position)} · Nota ${note}</div>
+            <div class="font-semibold text-sm">${escapeHtml(p.name)}</div>
+            <div class="text-[11px] text-gray-600">${escapeHtml(p.position)} · Nota ${note}</div>
           </div>
           <div class="flex items-center gap-2">
             ${you}
@@ -1116,14 +1256,14 @@ async function randomizeTeams(){
       const note = computedNote(p, byTarget).toFixed(1);
       const isMe = (meId && p.id===meId);
       const del = (isAdmin && !isMe) ? `
-        <button data-del="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg border hover:bg-gray-50 text-xs">
+        <button data-del="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg border hover:bg-gray-50 text-[11px]">
           Remover
         </button>` : "";
       return `
-        <div class="rounded-xl border p-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 bg-white">
+        <div class="rounded-lg border p-2 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 bg-white">
           <div>
-            <div class="font-semibold">${escapeHtml(p.name)}</div>
-            <div class="text-xs text-gray-600">${escapeHtml(p.position)} · Nota ${note}</div>
+            <div class="font-semibold text-sm">${escapeHtml(p.name)}</div>
+            <div class="text-[11px] text-gray-600">${escapeHtml(p.position)} · Nota ${note}</div>
           </div>
           <div class="flex items-center gap-2">
             <div class="text-xs text-gray-500">${isMe ? "Você confirmou presença e ainda não escolheu time." : "Apenas o próprio jogador escolhe."}</div>
@@ -1136,16 +1276,16 @@ async function randomizeTeams(){
     function absentCard(p, byTarget, meId, isAdmin){
       const note = computedNote(p, byTarget).toFixed(1);
       const isMe = (meId && p.id===meId);
-      const you = isMe ? `<span class="text-xs px-2 py-1 rounded-full bg-gray-100 text-gray-700">você</span>` : "";
+      const you = isMe ? `<span class="text-[11px] px-2 py-1 rounded-full bg-gray-100 text-gray-700">você</span>` : "";
       const del = (isAdmin && !isMe) ? `
-        <button data-del="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg border hover:bg-gray-50 text-xs">
+        <button data-del="${p.id}" data-name="${escapeHtml(p.name)}" class="px-2 py-1 rounded-lg border hover:bg-gray-50 text-[11px]">
           Remover
         </button>` : "";
       return `
-        <div class="rounded-xl border p-3 flex items-center justify-between gap-2 bg-white">
+        <div class="rounded-lg border p-2 flex items-center justify-between gap-2 bg-white">
           <div>
-            <div class="font-semibold">${escapeHtml(p.name)}</div>
-            <div class="text-xs text-gray-600">${escapeHtml(p.position)} · Nota ${note}</div>
+            <div class="font-semibold text-sm">${escapeHtml(p.name)}</div>
+            <div class="text-[11px] text-gray-600">${escapeHtml(p.position)} · Nota ${note}</div>
           </div>
           <div class="flex items-center gap-2">
             ${you}
@@ -1213,7 +1353,7 @@ async function randomizeTeams(){
 
           ${state.info ? `
             <div class="mt-4 p-3 rounded-xl bg-blue-50 border border-blue-200 text-sm text-blue-900">
-              ${escapeHtml(state.info)}
+              ${safeBoldInfo(state.info)}
             </div>
           ` : ``}
 
@@ -1244,12 +1384,12 @@ async function randomizeTeams(){
                 </div>
 
                 <div class="grid gap-2">
-                  <input id="playerName" placeholder="Seu nome" class="px-3 py-2 rounded-lg border" />
+                  <input id="playerName" ${meObj ? "disabled" : ""} placeholder="Seu nome" class="px-3 py-2 rounded-lg border ${meObj ? "bg-gray-100" : ""}" />
 
                   <div class="grid gap-1">
                     <label class="text-sm text-gray-700 font-semibold">Minha nota (autoavaliação) · 5–10</label>
                     <div class="grid grid-cols-2 gap-2">
-                      <select id="playerNote" class="px-3 py-2 rounded-lg border">
+                      <select id="playerNote" class="px-3 py-2 rounded-lg border ${meObj ? "bg-gray-100" : ""}" ${meObj ? "disabled" : ""}>
                         <option value="5" selected>Minha nota 5</option>
                         <option value="6">Minha nota 6</option>
                         <option value="7">Minha nota 7</option>
@@ -1257,17 +1397,23 @@ async function randomizeTeams(){
                         <option value="9">Minha nota 9</option>
                         <option value="10">Minha nota 10</option>
                       </select>
-                      <select id="playerPos" class="px-3 py-2 rounded-lg border">
+                      <select id="playerPos" class="px-3 py-2 rounded-lg border ${meObj ? "bg-gray-100" : ""}" ${meObj ? "disabled" : ""}>
                         ${POSICOES.map(p=>`<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`).join("")}
                       </select>
                     </div>
                   </div>
-
-                  <button id="btnRegister" class="px-3 py-2 rounded-lg bg-green-600 text-white hover:bg-green-700 font-semibold ${state.open ? "" : "opacity-50 cursor-not-allowed"}" ${state.open ? "" : "disabled"}>
+<button id="btnRegister" class="px-3 py-2 rounded-lg bg-green-600 text-white hover:bg-green-700 font-semibold ${(!meObj && state.open) ? "" : "opacity-50 cursor-not-allowed"}" ${(!meObj && state.open) ? "" : "disabled"}>
                     Entrar na lista
                   </button>
 
+<button id="btnRegisterSendWA" class="px-3 py-2 rounded-lg bg-green-700 text-white hover:bg-green-800 font-semibold ${((!meObj && state.open) || meObj) ? "" : "opacity-50 cursor-not-allowed"}" ${((!meObj && state.open) || meObj) ? "" : "disabled"}>
+  ${meObj ? "Enviar WhatsApp meus dados" : "Cadastrar + WhatsApp"}
+</button>
+
+
                   ${meObj ? `
+                    <div class="text-xs text-gray-600">Você já está logado. Para cadastrar outra pessoa, use <b>Adicionar jogador</b>.</div>
+
                     <div class="text-sm text-gray-700">
                       Logado como <span class="font-semibold">${escapeHtml(meObj.name)}</span> · Nota ${myNote} ·
                       ${myPresent ? `<span class="text-green-700 font-semibold">Presente</span>` : `<span class="text-gray-500 font-semibold">Ausente</span>`}
@@ -1301,7 +1447,35 @@ async function randomizeTeams(){
   Dica: use <b>Adicionar jogador</b> para cadastrar alguém pelo seu celular e passe o <b>Código do Jogador</b> para ele recuperar no aparelho dele.
 </div>
 
-                    <div class="mt-3 rounded-xl border bg-white p-3">
+                    <div class="border-t pt-3">
+                  <div class="grid gap-2">
+                                          <div class="mt-3 px-3 py-2 rounded-xl border bg-gradient-to-r from-blue-50 to-orange-50 text-center text-base sm:text-lg font-extrabold text-blue-700">
+                                            🏐 <span class="text-orange-600">Escolha seu Time</span> 👇
+                                          </div>
+                    
+
+                    <div class="flex flex-wrap gap-2">
+                      <button id="btnTeam1" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null)) ? "" : "opacity-50 cursor-not-allowed"}" ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null)) ? "" : "disabled"}>Time 1 (${team1Count}/${TEAM_MAX})</button>
+                      <button id="btnTeam2" class="px-3 py-2 rounded-lg bg-orange-600 text-white hover:bg-orange-700 font-semibold ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null)) ? "" : "opacity-50 cursor-not-allowed"}" ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null)) ? "" : "disabled"}>Time 2 (${team2Count}/${TEAM_MAX})</button>
+                    </div>
+
+                    <div class="text-xs text-gray-600">
+                      Vagas: <span class="font-semibold text-blue-700">${remaining1}</span> no Time 1 ·
+                      <span class="font-semibold text-orange-700">${remaining2}</span> no Time 2 ·
+                      <span class="font-semibold">${waiting.length}</span> em espera
+                    </div>
+
+                    <button id="btnRate" class="w-full px-3 py-2 rounded-lg bg-purple-600 text-white hover:bg-purple-700 font-semibold ${meObj ? "" : "opacity-50 cursor-not-allowed"}" ${meObj ? "" : "disabled"}>Avaliar jogadores</button>
+                  </div>
+
+                  ${bMsg.text ? `
+                    <div class="mt-3 p-3 rounded-xl ${bMsg.ok ? "bg-green-50" : "bg-yellow-50"} border">
+                      <div class="text-sm font-semibold text-center">${escapeHtml(bMsg.text)}</div>
+                    </div>
+                  ` : ``}
+                </div>
+
+<div class="mt-3 rounded-xl border bg-white p-3">
                       <div class="text-sm font-extrabold text-gray-800">Atualizar meu cadastro</div>
                       <div class="mt-2">
   <input id="myNameInput" class="w-full px-3 py-2 rounded-lg border" placeholder="Meu nome" value="${escapeHtml(meObj.name||"")}" />
@@ -1331,7 +1505,9 @@ async function randomizeTeams(){
     <button id="btnCopyMyAccessCode" class="px-2 py-1.5 rounded-lg bg-gray-900 text-white hover:bg-gray-800 font-semibold text-sm ${meObj.accessCode ? "" : "opacity-50 cursor-not-allowed"}" ${meObj.accessCode ? "" : "disabled"}>
       Copiar
     </button>
-  </div>
+</div>
+</div>
+
   ${!meObj.accessCode ? `
     <button id="btnGenMyAccessCode" class="mt-2 w-full px-3 py-2 rounded-lg border hover:bg-gray-50 font-semibold text-sm">
       Gerar meu código
@@ -1343,10 +1519,7 @@ async function randomizeTeams(){
                     </button>
 
                     ${myPresent ? `
-                      <div class="mt-3 px-3 py-2 rounded-xl border bg-gradient-to-r from-blue-50 to-orange-50 text-center text-base sm:text-lg font-extrabold text-blue-700">
-                        🏐 <span class="text-orange-600">Escolha seu Time</span> 👇
-                      </div>
-                    ` : `
+` : `
                       <div class="mt-2 text-sm text-gray-600">
                         Para jogar nesta rodada, clique em <b>Confirmar presença</b>.
                       </div>
@@ -1370,28 +1543,7 @@ async function randomizeTeams(){
 `}
                 </div>
 
-                <div class="border-t pt-3">
-                  <div class="grid gap-2">
-                    <div class="flex flex-wrap gap-2">
-                      <button id="btnTeam1" class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null)) ? "" : "opacity-50 cursor-not-allowed"}" ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null)) ? "" : "disabled"}>Time 1 (${team1Count}/${TEAM_MAX})</button>
-                      <button id="btnTeam2" class="px-3 py-2 rounded-lg bg-orange-600 text-white hover:bg-orange-700 font-semibold ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null)) ? "" : "opacity-50 cursor-not-allowed"}" ${(meObj && myPresent && state.open && (!fullTeams || myTeam!=null)) ? "" : "disabled"}>Time 2 (${team2Count}/${TEAM_MAX})</button>
-                    </div>
-
-                    <div class="text-xs text-gray-600">
-                      Vagas: <span class="font-semibold text-blue-700">${remaining1}</span> no Time 1 ·
-                      <span class="font-semibold text-orange-700">${remaining2}</span> no Time 2 ·
-                      <span class="font-semibold">${waiting.length}</span> em espera
-                    </div>
-
-                    <button id="btnRate" class="w-full px-3 py-2 rounded-lg bg-purple-600 text-white hover:bg-purple-700 font-semibold ${meObj ? "" : "opacity-50 cursor-not-allowed"}" ${meObj ? "" : "disabled"}>Avaliar jogadores</button>
-                  </div>
-
-                  ${bMsg.text ? `
-                    <div class="mt-3 p-3 rounded-xl ${bMsg.ok ? "bg-green-50" : "bg-yellow-50"} border">
-                      <div class="text-sm font-semibold text-center">${escapeHtml(bMsg.text)}</div>
-                    </div>
-                  ` : ``}
-                </div>
+                
 
                 <div class="border-t pt-3">
                   <h3 class="font-semibold mb-2">Compartilhar</h3>
@@ -1473,42 +1625,42 @@ async function randomizeTeams(){
               </div>
 
               <div class="lg:col-span-2 grid gap-4 md:grid-cols-2">
-                <div class="bg-white rounded-2xl border p-4">
+                <div class="bg-white rounded-2xl border p-3">
                   <div class="flex items-center justify-between">
-                    <h2 class="text-xl font-bold text-blue-700">Time 1 <span class="text-sm font-semibold text-gray-600">(${team1Count}/${TEAM_MAX})</span></h2>
+                    <h2 class="text-lg font-bold text-blue-700">Time 1 <span class="text-sm font-semibold text-gray-600">(${team1Count}/${TEAM_MAX})</span></h2>
                     <div class="text-sm text-gray-600">Média: ${t1Avg}</div>
                   </div>
-                  <div class="mt-3 space-y-2">
+                  <div class="mt-2 space-y-2 max-h-[340px] overflow-y-auto pr-1">
                     ${team1.length ? team1.map(p => playerCard(p, byTarget, meObj && meObj.id, session.admin)).join("") : `<div class="text-sm text-gray-500">Vazio</div>`}
                   </div>
                 </div>
 
-                <div class="bg-white rounded-2xl border p-4">
+                <div class="bg-white rounded-2xl border p-3">
                   <div class="flex items-center justify-between">
-                    <h2 class="text-xl font-bold text-orange-700">Time 2 <span class="text-sm font-semibold text-gray-600">(${team2Count}/${TEAM_MAX})</span></h2>
+                    <h2 class="text-lg font-bold text-orange-700">Time 2 <span class="text-sm font-semibold text-gray-600">(${team2Count}/${TEAM_MAX})</span></h2>
                     <div class="text-sm text-gray-600">Média: ${t2Avg}</div>
                   </div>
-                  <div class="mt-3 space-y-2">
+                  <div class="mt-2 space-y-2 max-h-[340px] overflow-y-auto pr-1">
                     ${team2.length ? team2.map(p => playerCard(p, byTarget, meObj && meObj.id, session.admin)).join("") : `<div class="text-sm text-gray-500">Vazio</div>`}
                   </div>
                 </div>
 
-                <div class="bg-white rounded-2xl border p-4 md:col-span-2">
+                <div class="bg-white rounded-2xl border p-3 md:col-span-2">
                   <div class="flex items-center justify-between">
                     <h2 class="text-lg font-semibold">Presentes · Aguardando escolha</h2>
                     <div class="text-sm text-gray-600">Presentes: ${presentPlayers.length} · Total cadastrados: ${playersArr.length}</div>
                   </div>
-                  <div class="mt-3 space-y-2">
+                  <div class="mt-2 space-y-2 max-h-[340px] overflow-y-auto pr-1">
                     ${waiting.length ? waiting.map(p => waitingCard(p, byTarget, meObj && meObj.id, session.admin)).join("") : `<div class="text-sm text-gray-500">Ninguém aguardando.</div>`}
                   </div>
                 </div>
 
-                <div class="bg-white rounded-2xl border p-4 md:col-span-2">
+                <div class="bg-white rounded-2xl border p-3 md:col-span-2">
                   <div class="flex items-center justify-between">
                     <h2 class="text-lg font-semibold">Ausentes (rodada atual)</h2>
                     <div class="text-sm text-gray-600">Ausentes: ${absent.length}</div>
                   </div>
-                  <div class="mt-3 space-y-2">
+                  <div class="mt-2 space-y-2 max-h-[340px] overflow-y-auto pr-1">
                     ${absent.length ? absent.map(p => absentCard(p, byTarget, meObj && meObj.id, session.admin)).join("") : `<div class="text-sm text-gray-500">Ninguém ausente.</div>`}
                   </div>
                 </div>
@@ -1527,6 +1679,7 @@ async function randomizeTeams(){
         $("btnLeave").onclick = ()=> leaveRoom();
 
         if($("btnRegister")) $("btnRegister").onclick = ()=> registerMe();
+        if($("btnRegisterSendWA")) $("btnRegisterSendWA").onclick = ()=> registerMeSendWhatsApp();
         if($("btnSaveMyProfile")) $("btnSaveMyProfile").onclick = ()=> updateMyProfile();
 
 if($("btnCopyMyAccessCode")) $("btnCopyMyAccessCode").onclick = ()=> {
@@ -1621,6 +1774,22 @@ if($("btnClaimAccessCode")) $("btnClaimAccessCode").onclick = ()=> claimPlayerBy
     // Boot
     // ===============================
     (function boot(){
+
+// Mostra erros de JS na tela (para evitar ficar só "Carregando...")
+window.addEventListener("error", (ev)=>{
+  try{
+    const msg = (ev && ev.message) ? ev.message : String(ev);
+    setSyncError("Erro de JavaScript: " + msg);
+  }catch{}
+});
+window.addEventListener("unhandledrejection", (ev)=>{
+  try{
+    const msg = (ev && ev.reason && ev.reason.message) ? ev.reason.message : String(ev.reason || ev);
+    setSyncError("Promise rejeitada: " + msg);
+  }catch{}
+});
+
+
       wireModals();
 
       try{
