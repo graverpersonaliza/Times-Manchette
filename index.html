@@ -174,7 +174,7 @@ async function claimPlayerByAccessCode(){
     session.playerId = doc.id;
     persistSession();
     if($("accessCodeInput")) $("accessCodeInput").value = "";
-    setInfo(`Cadastro recuperado: ${d.name || "Jogador"}.`);
+    setInfo(`Inscrição recuperada: ${d.name || "Jogador"}.`);
   }catch(e){
     setSyncError(e && e.message ? e.message : e);
   }
@@ -528,7 +528,7 @@ attachRoom(code);
         persistSession();
 await ensureRoom(code);
         attachRoom(code);
-        setInfo("<b>Entrou na sala, Agora cadastre seu nome ou entre com seu codigo do jogador</b>");
+        setInfo("<b>Entrou na sala, Agora inscreva seu nome ou entre com seu codigo do jogador</b>");
       }catch(e){ setSyncError(e && e.message ? e.message : e); }
     }
 
@@ -563,7 +563,7 @@ await ensureRoom(code);
         // Bloqueia nova inscrição quando já está logado neste aparelho
         const already = me();
         if(already){
-          return alert("Você já está logado. Para mudar seus dados use 'Atualizar meu cadastro' ou 'Sair da lista'. Para cadastrar outra pessoa, use 'Adicionar jogador'.");
+          return alert("Você já está logado. Para mudar seus dados use 'Atualizar minha inscrição' ou 'Sair da lista'. Para inscrever outra pessoa, use 'Adicionar jogador'.");
         }
 
         const name = ($("playerName")?.value || "").trim();
@@ -655,7 +655,7 @@ async function registerMeSendWhatsApp(){
     if(pre) pre.location.href = url;
     else window.open(url, "_blank");
 
-    setInfo("Cadastro criado. Código do Jogador: " + accessCode + " — WhatsApp aberto com a mensagem pronta. Agora é só tocar em ENVIAR.");
+    setInfo("Inscrição criada. Código do Jogador: " + accessCode + " — WhatsApp aberto com a mensagem pronta. Agora é só tocar em ENVIAR.");
   }catch(e){
     if(pre) try{ pre.close(); }catch{}
     setSyncError(e && e.message ? e.message : e);
@@ -675,7 +675,7 @@ async function registerMeSendWhatsApp(){
         const position = ($("myPosSelect")?.value || m.position || "Coringa");
 
         await setPlayer(code, { id: m.id, name, baseNote, position, updatedAt: nowIso() });
-        setInfo("Cadastro atualizado (nome/nota/posição).");
+        setInfo("Inscrição atualizada (nome/nota/posição).");
       }catch(e){
         setSyncError(e && e.message ? e.message : e);
       }
@@ -693,7 +693,7 @@ function startAddPlayer(){
   if($("playerName")) $("playerName").value = "";
   if($("playerNote")) $("playerNote").value = "5";
   if($("playerPos")) $("playerPos").value = "Coringa";
-  setInfo("Modo adicionar jogador: cadastre a pessoa e depois passe o Código do Jogador para ela recuperar no celular/PC.");
+  setInfo("Modo adicionar jogador: inscreva a pessoa e depois passe o Código do Jogador para ela recuperar no celular/PC.");
   render();
   try{ window.scrollTo({top: 0, behavior: "smooth"}); }catch{ window.scrollTo(0,0); }
 }
@@ -715,7 +715,7 @@ async function markPresence(present){
       if(!code) return alert("Entre na sala primeiro (código da partida).");
       if(!m){
         m = await ensureMeLoaded();
-        if(!m) return alert("Seu cadastro ainda não carregou. Aguarde 1 segundo e tente novamente.");
+        if(!m) return alert("Sua inscrição ainda não carregou. Aguarde 1 segundo e tente novamente.");
       }
       if(!state.activeRoundId) return alert("Rodada não carregou. Recarregue a página.");
       if(!state.open) return alert("Inscrição fechada.");
@@ -750,7 +750,7 @@ async function markPresence(present){
       try{
         let m = me();
         if(!m){ m = await ensureMeLoaded(); }
-        if(!m) return alert("Cadastre-se para escolher time.");
+        if(!m) return alert("Inscreva-se para escolher time.");
         if(!state.open) return alert("Inscrição fechada.");
         if(!state.activeRoundId) return alert("Rodada não carregou. Recarregue a página.");
         if(!isPresent(m.id)) return alert("Confirme presença antes de escolher time.");
@@ -906,7 +906,7 @@ async function randomizeTeams(){
     // ===============================
     function openRatingModal(){
       const m = me();
-      if(!m) return alert("Cadastre-se para avaliar.");
+      if(!m) return alert("Inscreva-se para avaliar.");
       // Não exigimos presença para avaliar (permite avaliar mesmo após "Nova rodada").
 
       $("ratingBack").classList.remove("hidden");
@@ -1077,7 +1077,7 @@ COMO USAR (rápido):
 4) Confirme PRESENÇA 
 5) Escolha o TIME (1 ou 2) 
 6) Avalie jogadores (nota oculta 5–10) 
-DICA: - A "Minha nota" é sua autoavaliação (5–10). - Você pode atualizar depois em "Atualizar meu cadastro".`;
+DICA: - A "Minha nota" é sua autoavaliação (5–10). - Você pode atualizar depois em "Atualizar minha inscrição".`;
 }
 
 
@@ -1384,12 +1384,12 @@ function openWhatsApp(text, numberDigits){
                 </div>
 
                 <div class="grid gap-2">
-                  <input id="playerName" ${meObj ? "disabled" : ""} placeholder="Seu nome" class="px-3 py-2 rounded-lg border ${meObj ? "bg-gray-100" : ""}" />
+                  <input id="playerName" ${meObj ? "📲 Enviar Inscrição" : "📲 Enviar Inscrição"} placeholder="Seu nome" class="px-3 py-2 rounded-lg border ${meObj ? "📲 Enviar Inscrição" : "📲 Enviar Inscrição"}" />
 
                   <div class="grid gap-1">
                     <label class="text-sm text-gray-700 font-semibold">Minha nota (autoavaliação) · 5–10</label>
                     <div class="grid grid-cols-2 gap-2">
-                      <select id="playerNote" class="px-3 py-2 rounded-lg border ${meObj ? "bg-gray-100" : ""}" ${meObj ? "disabled" : ""}>
+                      <select id="playerNote" class="px-3 py-2 rounded-lg border ${meObj ? "📲 Enviar Inscrição" : "📲 Enviar Inscrição"}" ${meObj ? "📲 Enviar Inscrição" : "📲 Enviar Inscrição"}>
                         <option value="5" selected>Minha nota 5</option>
                         <option value="6">Minha nota 6</option>
                         <option value="7">Minha nota 7</option>
@@ -1397,7 +1397,7 @@ function openWhatsApp(text, numberDigits){
                         <option value="9">Minha nota 9</option>
                         <option value="10">Minha nota 10</option>
                       </select>
-                      <select id="playerPos" class="px-3 py-2 rounded-lg border ${meObj ? "bg-gray-100" : ""}" ${meObj ? "disabled" : ""}>
+                      <select id="playerPos" class="px-3 py-2 rounded-lg border ${meObj ? "📲 Enviar Inscrição" : "📲 Enviar Inscrição"}" ${meObj ? "📲 Enviar Inscrição" : "📲 Enviar Inscrição"}>
                         ${POSICOES.map(p=>`<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`).join("")}
                       </select>
                     </div>
@@ -1407,12 +1407,12 @@ function openWhatsApp(text, numberDigits){
                   </button>
 
 <button id="btnRegisterSendWA" class="px-3 py-2 rounded-lg bg-green-700 text-white hover:bg-green-800 font-semibold ${((!meObj && state.open) || meObj) ? "" : "opacity-50 cursor-not-allowed"}" ${((!meObj && state.open) || meObj) ? "" : "disabled"}>
-  ${meObj ? "Enviar WhatsApp meus dados" : "Cadastrar + WhatsApp"}
+  ${meObj ? "📲 Enviar Inscrição" : "📲 Enviar Inscrição"}
 </button>
 
 
                   ${meObj ? `
-                    <div class="text-xs text-gray-600">Você já está logado. Para cadastrar outra pessoa, use <b>Adicionar jogador</b>.</div>
+                    <div class="text-xs text-gray-600">Você já está logado. Para inscrever outra pessoa, use <b>Adicionar jogador</b>.</div>
 
                     <div class="text-sm text-gray-700">
                       Logado como <span class="font-semibold">${escapeHtml(meObj.name)}</span> · Nota ${myNote} ·
@@ -1444,7 +1444,7 @@ function openWhatsApp(text, numberDigits){
 </div>
 
 <div class="mt-1 text-xs text-gray-600">
-  Dica: use <b>Adicionar jogador</b> para cadastrar alguém pelo seu celular e passe o <b>Código do Jogador</b> para ele recuperar no aparelho dele.
+  Dica: use <b>Adicionar jogador</b> para inscrever alguém pelo seu celular e passe o <b>Código do Jogador</b> para ele recuperar no aparelho dele.
 </div>
 
                     <div class="border-t pt-3">
@@ -1465,7 +1465,7 @@ function openWhatsApp(text, numberDigits){
                       <span class="font-semibold">${waiting.length}</span> em espera
                     </div>
 
-                    <button id="btnRate" class="w-full px-3 py-2 rounded-lg bg-purple-600 text-white hover:bg-purple-700 font-semibold ${meObj ? "" : "opacity-50 cursor-not-allowed"}" ${meObj ? "" : "disabled"}>Avaliar jogadores</button>
+                    <button id="btnRate" class="w-full px-3 py-2 rounded-lg bg-purple-600 text-white hover:bg-purple-700 font-semibold ${meObj ? "📲 Enviar Inscrição" : "📲 Enviar Inscrição"}" ${meObj ? "📲 Enviar Inscrição" : "📲 Enviar Inscrição"}>Avaliar jogadores</button>
                   </div>
 
                   ${bMsg.text ? `
@@ -1476,7 +1476,7 @@ function openWhatsApp(text, numberDigits){
                 </div>
 
 <div class="mt-3 rounded-xl border bg-white p-3">
-                      <div class="text-sm font-extrabold text-gray-800">Atualizar meu cadastro</div>
+                      <div class="text-sm font-extrabold text-gray-800">Atualizar minha inscrição</div>
                       <div class="mt-2">
   <input id="myNameInput" class="w-full px-3 py-2 rounded-lg border" placeholder="Meu nome" value="${escapeHtml(meObj.name||"")}" />
 </div>
@@ -1490,14 +1490,14 @@ function openWhatsApp(text, numberDigits){
                         </select>
                       </div>
                       <button id="btnSaveMyProfile" class="mt-2 w-full px-3 py-2 rounded-lg bg-gray-900 text-white hover:bg-gray-800 font-semibold">
-                        Salvar cadastro
+                        Salvar inscrição
                       </button>
                       <div class="mt-2 text-xs text-gray-500">Atualize nome, nota e posição sem sair da sala.</div>
                     </div>
 
 <div class="mt-3 rounded-xl border bg-white p-3">
   <div class="text-sm font-extrabold text-gray-800">Meu Código do Jogador</div>
-  <div class="mt-1 text-xs text-gray-500">Use este código para entrar no mesmo cadastro em outro celular/PC.</div>
+  <div class="mt-1 text-xs text-gray-500">Use este código para entrar na mesma inscrição em outro celular/PC.</div>
   <div class="mt-2 flex items-center gap-2">
     <div class="flex-1 px-2 py-1.5 rounded-lg border bg-gray-50 font-mono tracking-wider text-center text-sm">
       ${meObj.accessCode ? escapeHtml(meObj.accessCode) : "—"}
@@ -1532,14 +1532,14 @@ function openWhatsApp(text, numberDigits){
                     ` : ``}
 <div class="mt-2 rounded-xl border bg-gray-50 p-3">
 
-  <div class="text-sm font-extrabold text-gray-800">Já se cadastrou?</div>
-  <div class="mt-1 text-xs text-gray-600">Digite seu <b>Código do Jogador</b> para recuperar seu cadastro neste aparelho.</div>
+  <div class="text-sm font-extrabold text-gray-800">Já se inscreveu?</div>
+  <div class="mt-1 text-xs text-gray-600">Digite seu <b>Código do Jogador</b> para recuperar sua inscrição neste aparelho.</div>
   <div class="mt-2 flex gap-2">
     <input id="accessCodeInput" placeholder="Ex.: A1B2C3D4E5" class="px-2 py-1.5 rounded-lg border flex-1 font-mono tracking-wider text-sm" />
     <button id="btnClaimAccessCode" class="px-3 py-1.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold text-sm">Entrar</button>
   </div>
 </div>
-<div class="text-xs text-gray-500 mt-2">Dica: ao se cadastrar, anote seu Código do Jogador.</div>
+<div class="text-xs text-gray-500 mt-2">Dica: ao se inscrever, anote seu Código do Jogador.</div>
 `}
                 </div>
 
