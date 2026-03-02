@@ -110,6 +110,7 @@
 
       matchDate: "",
       matchTime: "",
+      matchLocation: "",
       closeBeforeMin: 15
     };
 
@@ -298,11 +299,13 @@ async function saveMatchSchedule(){
   if(!code) return alert("Entre em uma sala primeiro (código da partida).");
   const matchDate = (document.getElementById("matchDate")?.value || "").trim();
   const matchTime = (document.getElementById("matchTime")?.value || "").trim();
+  const matchLocation = (document.getElementById("matchLocation")?.value || "").trim();
   const closeBeforeMin = Math.max(0, Number(document.getElementById("closeBeforeMin")?.value || 15));
   if(!matchDate || !matchTime) return alert("Informe a data e a hora da partida.");
-  await metaUpdate(code, { matchDate, matchTime, closeBeforeMin });
+  await metaUpdate(code, { matchDate, matchTime, matchLocation, closeBeforeMin });
   state.matchDate = matchDate;
   state.matchTime = matchTime;
+  state.matchLocation = matchLocation;
   state.closeBeforeMin = closeBeforeMin;
   setInfo("Horário da partida salvo.");
   maybeAutoCloseSchedule();
@@ -313,9 +316,10 @@ async function clearMatchSchedule(){
   if(!session.admin) return alert("Somente admin.");
   const code = String(state.code||"").toUpperCase();
   if(!code) return alert("Entre em uma sala primeiro (código da partida).");
-  await metaUpdate(code, { matchDate: "", matchTime: "", closeBeforeMin: 15 });
+  await metaUpdate(code, { matchDate: "", matchTime: "", matchLocation: "", closeBeforeMin: 15 });
   state.matchDate = "";
   state.matchTime = "";
+  state.matchLocation = "";
   state.closeBeforeMin = 15;
   setInfo("Horário da partida limpo.");
   render();
@@ -471,6 +475,7 @@ async function ensureMeLoaded(){
 
         state.matchDate = d && d.matchDate ? String(d.matchDate) : "";
         state.matchTime = d && d.matchTime ? String(d.matchTime) : "";
+        state.matchLocation = d && d.matchLocation ? String(d.matchLocation) : "";
         state.closeBeforeMin = d && d.closeBeforeMin != null ? Math.max(0, Number(d.closeBeforeMin)) : 15;
 
         const nextRid = d && d.activeRoundId ? String(d.activeRoundId) : "";
@@ -1085,6 +1090,8 @@ async function randomizeTeams(){
         createdAt: nowIso(),
         createdAtMs: Date.now(),
         by: (me() ? me().name : ""),
+        matchLabel: getMatchScheduleMeta().hasSchedule ? getMatchScheduleMeta().matchLabel : "",
+        matchLocation: state.matchLocation || "",
         avg1: Number(avg1.toFixed(2)),
         avg2: Number(avg2.toFixed(2)),
         team1,
@@ -1094,7 +1101,6 @@ async function randomizeTeams(){
 
     function formatTeamsText(payload){
       const code = payload.code || "";
-      const when = fmtBR(payload.createdAtMs || payload.createdAt);
       const team1 = payload.team1 || [];
       const team2 = payload.team2 || [];
       const avg1 = (payload.avg1 ?? 0).toFixed(2);
@@ -1169,6 +1175,9 @@ async function randomizeTeams(){
 
   if(sched.hasSchedule){
     lines.push(`PARTIDA: ${sched.matchLabel}`);
+  }
+  if(state.matchLocation){
+    lines.push(`LOCAL: ${state.matchLocation}`);
   }
 
   lines.push(
@@ -1256,7 +1265,8 @@ function openWhatsApp(text, numberDigits){
       wrap.style.color = "#111827";
 
       const code = payload.code || "";
-      const when = fmtBR(payload.createdAtMs || payload.createdAt);
+      const matchLabel = payload.matchLabel || "";
+      const matchLocation = payload.matchLocation || "";
       const avg1 = (payload.avg1 ?? 0).toFixed(2);
       const avg2 = (payload.avg2 ?? 0).toFixed(2);
 
@@ -1286,7 +1296,8 @@ function openWhatsApp(text, numberDigits){
           <div style="font-size:30px;font-weight:950;">🏐 Manchette VolleyBall</div>
           <div style="text-align:right;font-size:14px;color:#374151;">
             <div><b>Código:</b> ${escapeHtml(code)}</div>
-            <div>${escapeHtml(when)}</div>
+            ${matchLabel ? `<div><b>Partida:</b> ${escapeHtml(matchLabel)}</div>` : ``}
+            ${matchLocation ? `<div><b>Local:</b> ${escapeHtml(matchLocation)}</div>` : ``}
           </div>
         </div>
 
@@ -1448,6 +1459,7 @@ function openWhatsApp(text, numberDigits){
               ${scheduleMeta.hasSchedule ? `
                 <div class="mt-1 space-y-1 text-sm text-gray-600">
                   <div>⏰ Próxima partida: <b>${escapeHtml(matchLabel)}</b></div>
+                  ${state.matchLocation ? `<div>📍 Local: <b>${escapeHtml(state.matchLocation)}</b></div>` : ``}
                   <div>🕒 Inscrições até: <b>${escapeHtml(closeLabel)}</b></div>
                   <div>⌛ Faltam <b>${escapeHtml(countdownLabel)}</b></div>
                 </div>
@@ -1733,10 +1745,20 @@ function openWhatsApp(text, numberDigits){
                     </div>
                     <div class="mt-3 rounded-xl border p-3 bg-gray-50">
                       <div class="text-sm font-semibold">Horário da partida</div>
-                      <div class="mt-2 grid gap-2 sm:grid-cols-3">
+                      <div class="mt-2 grid gap-2 sm:grid-cols-2">
                         <input id="matchDate" type="date" value="${escapeHtml(state.matchDate || "")}" class="px-3 py-2 rounded-lg border" />
                         <input id="matchTime" type="time" value="${escapeHtml(state.matchTime || "")}" class="px-3 py-2 rounded-lg border" />
-                        <input id="closeBeforeMin" type="number" min="0" step="5" value="${escapeHtml(String(state.closeBeforeMin ?? 15))}" class="px-3 py-2 rounded-lg border" placeholder="Fechar antes (min)" />
+                      </div>
+                      <div class="mt-2">
+                        <label class="block text-xs font-semibold text-gray-600 mb-1">Local</label>
+                        <input id="matchLocation" type="text" maxlength="20" value="${escapeHtml(state.matchLocation || "")}" class="px-3 py-2 rounded-lg border w-full" placeholder="Local" />
+                      </div>
+                      <div class="mt-2">
+                        <div class="flex items-center gap-2">
+                          <span class="text-sm font-semibold text-gray-600">Fecha em</span>
+                          <input id="closeBeforeMin" type="number" min="0" step="5" value="${escapeHtml(String(state.closeBeforeMin ?? 15))}" class="px-3 py-2 rounded-lg border w-28" placeholder="0" />
+                          <span class="text-sm font-semibold text-gray-600">m</span>
+                        </div>
                       </div>
                       <div class="mt-2 flex flex-wrap gap-2">
                         <button id="btnSaveSchedule" class="px-3 py-2 rounded-lg bg-gray-900 text-white hover:bg-gray-800 font-semibold">Salvar horário</button>
